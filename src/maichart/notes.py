@@ -264,26 +264,34 @@ def parse_basic_touch_token(token: str) -> ParsedNote | None:
     )
 
 
+def expand_compact_taps(atom: str) -> tuple[str, ...]:
+    """Spell a valid compact Tap chord as individual simultaneous notes."""
+    match = BASIC_COMPACT_CHORD_RE.fullmatch(atom)
+    if match is None:
+        return (atom,)
+    positions = match["positions"]
+    if len(set(positions)) != len(positions):
+        return (atom,)
+    # Tolerate a suffix on a compact input as belonging to the adjacent key.
+    return (*positions[:-1], positions[-1] + match["modifiers"])
+
+
 def parse_compact_chord_token(token: str) -> list[ParsedNote] | None:
     """Parse compact simultaneous button syntax such as ``34`` or ``57``."""
 
     candidate = re.sub(r"\s+", "", token.strip())
-    match = BASIC_COMPACT_CHORD_RE.fullmatch(candidate)
-    if match is None:
+    children = expand_compact_taps(candidate)
+    if len(children) < 2:
         return None
-    positions = match.group("positions")
-    if len(set(positions)) != len(positions):
-        return None
-    modifiers = _parse_note_modifier_text(match.group("modifiers"))
     return [
         ParsedNote(
             note_type="tap",
-            position=int(position),
-            is_break=bool(modifiers["break"]),
+            position=int(child[0]),
+            is_break="b" in child[1:],
             raw=token,
-            modifiers=dict(modifiers),
+            modifiers=_parse_note_modifier_text(child[1:]),
         )
-        for position in positions
+        for child in children
     ]
 
 

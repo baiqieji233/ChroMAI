@@ -16,16 +16,18 @@ from maichart.generation.playability_policy import (
     validate_tap_on_slide_threshold_ms,
 )
 from maichart.maidata import parse_maidata_metadata
-from maichart.notes import BASIC_COMPACT_CHORD_RE
+from maichart.notes import expand_compact_taps
 
 
 def _native_text(note):
     # MiaCode's lenient parser can skip compact break chords (e.g. 12b).
     # Expand only this equivalent spelling for analysis, keeping child IDs,
     # modifiers, timings and the user's exported text unchanged.
-    if note.note_type == "tap" and BASIC_COMPACT_CHORD_RE.fullmatch(note.raw):
-        match = BASIC_COMPACT_CHORD_RE.fullmatch(note.raw)
-        return str(note.button if hasattr(note, "button") else note.position) + match["modifiers"]
+    if note.note_type == "tap":
+        children = expand_compact_taps(note.raw)
+        if len(children) > 1:
+            lane = str(note.button if hasattr(note, "button") else note.position)
+            return next(child for child in children if child[0] == lane)
     return note.raw
 
 

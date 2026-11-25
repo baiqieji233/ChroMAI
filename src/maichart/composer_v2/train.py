@@ -712,7 +712,7 @@ def train(args):
         comparable_config['future_configuration_weight'] = parent_config['future_configuration_weight']
     if parent and comparable_config != parent_config:
         raise ValueError("Parent model/audio/token contract differs; use its exact configuration or fresh training")
-    codec=ComponentCodec.from_dict(parent["codec"]) if parent else None
+    codec=ComponentCodec.from_dict(parent["codec"], explicit_taps=bool(args.init_checkpoint)) if parent else None
     dialect_policy = (parent['training_contract'].get('chart_dialect', chart_dialect.LEGACY_STRICT_POLICY)
                       if args.resume else chart_dialect.POLICY)
     if args.validation_manifest:

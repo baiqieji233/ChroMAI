@@ -59,6 +59,7 @@ class DiskSpatialHistory(nn.Module):
     def __init__(self, codec, width):
         super().__init__()
         self.codec = codec
+        self.tap_id = codec.ids.get('N:tap', -1)
         self.context = nn.Linear(_CONTEXT_WIDTH, width, bias=False)
         self.rim_readout = nn.Linear(width, len(_RIM_FEATURES))
         nn.init.zeros_(self.context.weight)
@@ -112,14 +113,14 @@ class DiskSpatialHistory(nn.Module):
             prior, seen_before, prior_contacts, prior_beats = (
                 state[name][:, start - 1] for name in ('parser', 'seen', 'contacts', 'beats'))
         else:
-            prior = ids.new_zeros(batch, 9)
+            prior = ids.new_zeros(batch, 8)
             prior_contacts = ids.new_zeros(batch, _HISTORY_SIZE)
             prior_beats = beats.new_zeros(batch, _HISTORY_SIZE)
             if state is not None:
                 seen_before = ids.new_zeros(batch, len(_CONTACTS), dtype=torch.int32)
 
-        (region_before, open_before, fence_before, hidden_before, kind_before, head_before,
-         phase_before, head_value_before, previous_kind) = prior.unbind(-1)
+        (region_before, open_before, fence_before, hidden_before, tap_before, other_before,
+         phase_before, previous_kind) = prior.unbind(-1)
         region_code, kind, pad, phase = self.token_fields[ids].unbind(-1)
         position = torch.arange(start + 1, start + length + 1, device=ids.device)
         region = torch.maximum(_prefix_max(region_code), region_before[:, None])
@@ -133,27 +134,25 @@ class DiskSpatialHistory(nn.Module):
         phase_seen = _latest(phase.ne(0), position, phase_before)
         layout = observing & inside & phase_seen.gt(opened) & ~ended & visible
 
-        # The first pad component after a kind is its head. A path endpoint or
-        # intermediate knot cannot create another observation for that atom.
+        # Legacy Tap atoms may contain several consecutive button tokens.
+        # Other note kinds have exactly one head, followed by their payload.
         previous = _previous(kind, previous_kind)
-        head = (previous > 0) & (pad >= 0) & (pad.lt(8) == previous.eq(1))
-        atom_kind = _latest(kind.ne(0), position, kind_before)
-        atom_head = _latest(head, position, head_before)
-        head_value = torch.cat((head_value_before[:, None], pad), dim=1).gather(1, (atom_head - start).clamp_min(0))
-        completed_atom = (ids.eq(self.codec.end_note_id) & inside & observing & atom_kind.gt(opened)
-                          & atom_head.gt(atom_kind))
+        tap = ids.eq(self.tap_id)
+        tap_begin = _latest(tap, position, tap_before)
+        other = _latest((kind.ne(0) & ~tap) | ids.eq(self.codec.end_note_id) | delimiter, position, other_before)
+        first_head = (previous > 0) & (pad.lt(8) == previous.eq(1))
+        head = inside & observing & pad.ge(0) & (first_head | (tap_begin.gt(other) & pad.lt(8)))
         if state is None:
             # Full sequences can place each completed atom in its event and
             # pad slot once. Equal writes of True collapse duplicate contacts.
-            slots = opened * len(_CONTACTS) + head_value
-            slots = torch.where(completed_atom, slots, 0)
+            slots = torch.where(head, opened * len(_CONTACTS) + pad, 0)
             observed = ids.new_zeros(batch, (length + 1) * len(_CONTACTS), dtype=torch.bool)
             observed.scatter_(1, slots, True)
             masks = (observed.reshape(batch, length + 1, len(_CONTACTS)) * self.contact_bits).sum(-1)
             contact_mask = masks.gather(1, opened)
         else:
             # Cached prefixes also preserve partial events for mid-atom rewind.
-            matches = completed_atom[..., None] & head_value[..., None].eq(self.contact_indices)
+            matches = head[..., None] & pad[..., None].eq(self.contact_indices)
             seen = torch.maximum(_prefix_max(matches * position[:, None].int()), seen_before[:, None])
             contact_mask = ((seen > opened[..., None]) * self.contact_bits).sum(-1)
         complete = ended & observing & inside
@@ -176,8 +175,7 @@ class DiskSpatialHistory(nn.Module):
         contacts = recent(committed, prior_contacts)
         completed_beats = recent(beats, prior_beats)
         if state is not None:
-            parser = torch.stack((region, opened, fence, hidden, atom_kind, atom_head, phase_seen,
-                                  head_value, kind), dim=-1)
+            parser = torch.stack((region, opened, fence, hidden, tap_begin, other, phase_seen, kind), dim=-1)
             self._remember(state, 'parser', parser, start)
             self._remember(state, 'seen', seen, start)
             self._remember(state, 'contacts', contacts, start)

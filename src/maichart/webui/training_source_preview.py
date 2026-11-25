@@ -674,8 +674,8 @@ def _parseable(path, slot, dialect):
 
     try:
         chart = parse_event_chart(path, slot, strict_notes=False)
-        if dialect == chart_dialect.POLICY:
-            chart, _ = chart_dialect.normalize_training_chart(chart)
+        if dialect in chart_dialect.NORMALIZED_POLICIES:
+            chart, _ = chart_dialect.normalize_training_chart(chart, dialect)
         inspect_chart(chart)
     except (OSError, ValueError, KeyError, UnicodeError):
         return False

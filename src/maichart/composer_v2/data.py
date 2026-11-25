@@ -88,7 +88,7 @@ class ComposerV2Dataset(Dataset):
             raise ValueError('Window lengths must be integral beats; target positive, history/future nonnegative')
         if int(max_tokens) < 4:
             raise ValueError('max_tokens must be at least 4')
-        if dialect_policy not in (chart_dialect.POLICY, chart_dialect.LEGACY_STRICT_POLICY):
+        if dialect_policy not in (*chart_dialect.NORMALIZED_POLICIES, chart_dialect.LEGACY_STRICT_POLICY):
             raise ValueError(f'Unknown Composer v2 chart dialect policy: {dialect_policy}')
         if auto_quality_policy not in ('off', 'auto_v1'):
             raise ValueError(f'Unknown auto_quality_policy: {auto_quality_policy}')
@@ -128,7 +128,7 @@ class ComposerV2Dataset(Dataset):
             }
         entries = payload.get('songs', [])
         chart_start = time.perf_counter()
-        normalize_dialect = dialect_policy == chart_dialect.POLICY
+        normalize_dialect = dialect_policy in chart_dialect.NORMALIZED_POLICIES
         chart_cache = ChartCache(cache_dir, dialect_policy if normalize_dialect else None)
         prepared_charts = {}
         reused_charts = cache_hits = 0
@@ -187,7 +187,7 @@ class ComposerV2Dataset(Dataset):
                         chart = _parse_event_metadata(metadata, slot, strict_notes=False)
                         dialect_edits = {}
                         if normalize_dialect:
-                            chart, dialect_edits = chart_dialect.normalize_training_chart(chart)
+                            chart, dialect_edits = chart_dialect.normalize_training_chart(chart, dialect_policy)
                         inspect_chart(chart)
                     else:
                         chart, sustain, dialect_edits = prepared_chart

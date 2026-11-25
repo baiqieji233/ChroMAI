@@ -9,6 +9,8 @@ import math
 import re
 from typing import Any
 
+from maichart.notes import expand_compact_taps
+
 
 _LANE = "12345678"
 _SHAPES = "-^v<>VpqszwW"
@@ -522,11 +524,13 @@ def parse_markers(inote: str, first: float = 0.0) -> tuple[list[dict[str, Any]],
             if not token:
                 return
             if token.upper() != "E":
-                pieces = token.split("*") if "*" not in token else [token]
-                # Numeric chord shorthand is expanded into native individual taps.
-                if len(token) > 1 and all(ch in _LANE for ch in token):
+                pieces = expand_compact_taps(token)
+                if len(pieces) > 1:
+                    columns = [token_col + n for n in range(len(pieces))]
+                elif len(token) > 1 and all(ch in _LANE for ch in token):
+                    # Keep repeated heads visible to overlap diagnostics.
                     pieces = list(token)
-                    columns = [token_col + n for n in range(len(token))]
+                    columns = [token_col + n for n in range(len(pieces))]
                 else:
                     columns = [token_col] * len(pieces)
                 for piece, col in zip(pieces, columns):

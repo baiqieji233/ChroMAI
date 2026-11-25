@@ -1466,7 +1466,7 @@ def _cached_heads(path, index, signature):
     # slide geometry, inverse beat maps or ruler marks for every single note.
     from maichart.event_timing import EventTempo, parse_event_chart
     from maichart.generation.muri.parser import _parse_one, _reference_data
-    from maichart.notes import BASIC_COMPACT_CHORD_RE, _split_top_level_slashes
+    from maichart.notes import expand_compact_taps, _split_top_level_slashes
     from maichart.tempo_clock import TempoClock
     from maichart.webui.chart_timeline import _unknown_head
     chart = parse_event_chart(path, index, strict_notes=False)
@@ -1483,9 +1483,7 @@ def _cached_heads(path, index, signature):
         for atom_index, raw in enumerate(_split_top_level_slashes(point.note_text)):
             if not raw:
                 continue
-            compact = BASIC_COMPACT_CHORD_RE.fullmatch(raw)
-            atoms = [button + compact['modifiers'] for button in compact['positions']] if compact else [raw]
-            for atom in atoms:
+            for atom in expand_compact_taps(raw):
                 try:
                     markers = _parse_one(atom, point_index + 1, atom_index + 1, second, 0, clock.bpm(point.beat), refs)
                     if not markers:

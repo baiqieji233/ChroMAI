@@ -981,7 +981,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     text,_=compile_event_points(points,tempo_changes=[t for t in tempo if t.beat<=end],bpm=tempo[0].bpm,
         first=first,end_beat=export_end,title=chart_meta['title'],artist=chart_meta['artist'],
         designer=chart_meta['designer'],difficulty=chart_meta['difficulty'],
-        level=chart_meta['level_label'],strict_notes=False)
+        level=chart_meta['level_label'],strict_notes=False,explicit_taps=True)
     output=Path(args.output).resolve();output.parent.mkdir(parents=True,exist_ok=True);output.write_text(text,encoding='utf-8')
     report=dict(family='chart_composer_v2',sequence_policy=config.sequence_policy,eos_policy='actual_chart_end_only',
         checkpoint=str(args.checkpoint),audio=str(audio_path),output=str(output),seed=args.seed,

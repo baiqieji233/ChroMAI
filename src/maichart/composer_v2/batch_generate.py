@@ -100,7 +100,7 @@ def _parallel_chart(item,index,snapshot,digest,timing):
                 payload=read(snapshot);checked=inspect_payload(payload)
                 if not checked['can_generate']:raise ValueError(checked['error'])
                 config=ComposerV2Config.from_dict(checked['model_config'])
-                model=ComposerV2(config,ComponentCodec.from_dict(payload['codec']))
+                model=ComposerV2(config,ComponentCodec.from_dict(payload['codec'], explicit_taps=True))
                 model.load_state_dict(payload['model_state_dict'],strict=True)
                 model=model.to(item.device).eval()
                 # The parent has already completed MERT/native extraction and
@@ -276,7 +276,7 @@ def generate_batch(args):
     try:
         if parallel==1:
             report['stage']='loading_model';_write(manifest,report);_emit(report,0)
-            model=ComposerV2(config,ComponentCodec.from_dict(payload['codec']))
+            model=ComposerV2(config,ComponentCodec.from_dict(payload['codec'], explicit_taps=True))
             model.load_state_dict(payload['model_state_dict'],strict=True);model=model.to(device).eval()
             prepared=_preparation(args,config,device,report,manifest)
             report['status']='running'

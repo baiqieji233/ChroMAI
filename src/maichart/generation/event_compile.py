@@ -28,7 +28,7 @@ from maichart.ir import (
     UnknownChartToken,
 )
 from maichart.maidata import parse_maidata_metadata
-from maichart.notes import parse_timing_point_notes, parsed_note_to_chart_note
+from maichart.notes import _split_top_level_slashes, expand_compact_taps, parse_timing_point_notes, parsed_note_to_chart_note
 
 
 def compile_event_points(
@@ -46,6 +46,7 @@ def compile_event_points(
     tail_step: Fraction = Fraction(1, 4),
     strict_notes: bool = False,
     build_ir: bool = True,
+    explicit_taps: bool = False,
 ) -> tuple[str, ChartIR | None]:
     """Compile a full Maidata document and verify its exact event roundtrip.
 
@@ -67,6 +68,9 @@ def compile_event_points(
         if "\n" in value or "\r" in value:
             raise ValueError(f"{name} must be a single-line Maidata field.")
 
+    if explicit_taps:
+        points = (EventPoint(p.beat, "/".join(child for atom in _split_top_level_slashes(p.note_text)
+                                              for child in expand_compact_taps(atom))) for p in points)
     events = sorted(
         (EventPoint(point.beat, point.note_text) for point in points), key=lambda point: point.beat
     )

@@ -21,14 +21,14 @@ def downgrade_or_skip_conflict(guard,rejected,after):
        so no hard Muri is ever admitted into the exported chart.
     """
     from maichart.event_timing import EventPoint
-    from maichart.composer.event_set_codec import _atoms
+    from .codec import explicit_note_atoms
     import re
     candidates_seen=set()
     latest_beat=None
     for point,_ in rejected:
         if point.beat<=after:continue
         if latest_beat is None or point.beat>latest_beat:latest_beat=point.beat
-        atoms=list(_atoms(point.note_text))
+        atoms=list(explicit_note_atoms(point.note_text))
         # 1) Proper single-atom subsets of a chord.
         if len(atoms)>1:
             for atom in atoms:

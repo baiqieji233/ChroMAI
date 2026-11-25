@@ -15,11 +15,10 @@ import torch
 from maichart.event_timing import EventPoint, EventTempo
 from maichart.tempo_clock import TempoClock
 from maichart.generation.event_compile import compile_event_points
-from maichart.composer.event_set_codec import _atoms
 from maichart.composer.guard import EventGuard
 from .checkpoint import read, inspect_payload
 from .codec import ComponentCodec
-from .codec import render_atom
+from .codec import explicit_note_atoms, render_atom
 from .data import ComposerV2Dataset, ComposerV2Song, collate_composer_v2, _beats_at_seconds
 from .conditions import resolve_generation_condition
 from .defaults import DEFAULT_TEMPO_DETECTION, TEMPO_DETECTION_CHOICES
@@ -254,7 +253,7 @@ class WindowSampler:
             prefix_length=len(target)
             for retry in range(event_retries):
                 used=set();start=prefix_length
-                for _ in _atoms(point.note_text):
+                for _ in explicit_note_atoms(point.note_text):
                     atom=[]
                     while True:
                         token=self.next(target,self._head_choices(self.codec.allowed_atom_next(atom),atom,used))
@@ -434,7 +433,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         epoch=inspected['epoch'],inference_only=inspected['inference_only'],family=inspected['family'])
     if digest is not None:checkpoint_info['sha256']=digest
     print('composer_v2_checkpoint_loaded '+json.dumps(checkpoint_info,ensure_ascii=False),flush=True)
-    codec = ComponentCodec.from_dict(payload['codec'])
+    codec = ComponentCodec.from_dict(payload['codec'], explicit_taps=True)
     config = ComposerV2Config.from_dict(inspected['model_config'])
     if getattr(args,'eos_suppression',False) and config.sequence_policy!='continuous_events_v1':
         raise ValueError('提前结束抑制仅适用于连续事件检查点')
@@ -607,7 +606,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     text, _ = compile_event_points(points, tempo_changes=output_tempo, bpm=bpm,
         first=first, end_beat=export_end, title=chart_meta['title'],
         artist=chart_meta['artist'], designer=chart_meta['designer'],
-        difficulty=chart_meta['difficulty'], level=chart_meta['level_label'], strict_notes=False)
+        difficulty=chart_meta['difficulty'], level=chart_meta['level_label'], strict_notes=False, explicit_taps=True)
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text, encoding='utf-8')

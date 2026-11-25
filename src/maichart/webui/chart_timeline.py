@@ -10,7 +10,7 @@ import re
 
 from maichart.event_timing import EventTempo, parse_event_chart
 from maichart.generation.muri.parser import _parse_one, _reference_data
-from maichart.notes import BASIC_COMPACT_CHORD_RE, _split_top_level_slashes
+from maichart.notes import expand_compact_taps, _split_top_level_slashes
 from maichart.tempo_clock import TempoClock
 
 
@@ -112,9 +112,7 @@ def _cached(path_text, modified_ns, size, difficulty_index):
             for raw in _split_top_level_slashes(group):
                 atom_index+=1
                 if not raw:continue
-                compact=BASIC_COMPACT_CHORD_RE.fullmatch(raw)
-                atoms=[button+compact['modifiers'] for button in compact['positions']] if compact else [raw]
-                for child_index,atom in enumerate(atoms):
+                for child_index,atom in enumerate(expand_compact_taps(raw)):
                     source_id=f'{point_index}:{atom_index-1}:{child_index}'
                     try:
                         markers=_parse_one(atom,point_index+1,atom_index,second,0,bpm,refs)

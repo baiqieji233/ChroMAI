@@ -71,12 +71,12 @@ def summarize(events,*,boundary_tokens=0):
 
 
 def span_diagnostics(points,codec,start,stop):
-    from maichart.composer.event_set_codec import _atoms
+    from .codec import explicit_note_atoms
     from .timing_metrics import rhythm_profile
     points=[p for p in points if start<=p.beat<stop]
     gaps=[float(b.beat-a.beat) for a,b in zip(points,points[1:])]
     profile=rhythm_profile(points)
-    return dict(events_in_span=len(points),atoms_in_span=sum(len(_atoms(p.note_text)) for p in points),
+    return dict(events_in_span=len(points),atoms_in_span=sum(len(explicit_note_atoms(p.note_text)) for p in points),
         tokens_in_span=len(codec.encode_points(points)),
         mean_gap_beats=sum(gaps)/len(gaps) if gaps else None,max_gap_beats=max(gaps) if gaps else None,
         phase_counts=profile['phase_counts'],interval_counts=profile['interval_counts'])

@@ -89,12 +89,12 @@ def _head_entries(points, clock):
     Slash atoms follow the existing codec contract; slide paths joined by *
     belong to their atom rather than becoming additional note heads.
     """
-    from maichart.composer.event_set_codec import _atoms
+    from .codec import explicit_note_atoms
     entries = []
     for point in points:
         if not hasattr(point, 'note_text'):
             return None
-        entries.append((float(clock.at(point.beat)), len(_atoms(point.note_text))))
+        entries.append((float(clock.at(point.beat)), len(explicit_note_atoms(point.note_text))))
     return entries
 
 

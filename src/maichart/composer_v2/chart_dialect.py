@@ -7,12 +7,14 @@ import re
 
 from maichart.duration import parse_duration_expr
 from maichart.event_timing import EventPoint
-from maichart.notes import BASIC_HOLD_RE, BASIC_TOUCH_HOLD_RE, _split_top_level_slashes
+from maichart.notes import BASIC_HOLD_RE, BASIC_TOUCH_HOLD_RE, _split_top_level_slashes, expand_compact_taps
 from maichart.training.chart_sanitization import LEGACY_STRICT_POLICY
 from .codec import atom_components
 
 
-POLICY = 'simai_training_dialect_v1'
+ORIGINAL_POLICY = 'simai_training_dialect_v1'
+POLICY = 'simai_training_dialect_v2'
+NORMALIZED_POLICIES = (ORIGINAL_POLICY, POLICY)
 STAR_TAP = re.compile(r'([1-8])([bx$]+)')
 SLIDE_HEAD = re.compile(r'([1-8])([bx@?!]*)(?=[-^v<>Vpqszw])')
 
@@ -49,7 +51,7 @@ def _normalize_atom(atom):
     return atom, None
 
 
-def normalize_training_chart(chart):
+def normalize_training_chart(chart, policy=POLICY):
     """Keep the original clock, even when a cell loses all its atoms."""
     points = []
     edits = dict(normalized_atoms=0, headless_slide=0, unsupported=0)
@@ -61,8 +63,9 @@ def normalize_training_chart(chart):
             if reason is not None:
                 edits[reason] += 1
             else:
-                edits['normalized_atoms'] += atom != original
-                kept.append(atom)
+                children = expand_compact_taps(atom) if policy == POLICY else (atom,)
+                edits['normalized_atoms'] += atom != original or len(children) > 1
+                kept.extend(children)
         if kept:
             points.append(EventPoint(point.beat, '/'.join(kept)))
     if any(edits.values()):

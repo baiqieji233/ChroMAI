@@ -8,7 +8,6 @@ from fractions import Fraction
 from bisect import bisect_left,bisect_right
 from collections import OrderedDict
 from .codec import ComponentCodec, SPECIAL, VocabularyCoverageError, component_inventory, render_atom
-from maichart.composer.event_set_codec import _atoms
 from maichart.event_timing import EventPoint
 
 POLICY='continuous_events_v1'
@@ -33,7 +32,7 @@ class StreamCodec(ComponentCodec):
         if cached is not None:
             self._note_tokens.move_to_end(text)
             return cached
-        tokens = tuple(token for atom in _atoms(text) for token in self.encode_atom(atom))
+        tokens = tuple(token for atom in self.note_atoms(text) for token in self.encode_atom(atom))
         self._note_tokens[text] = tokens
         if len(self._note_tokens) > 8192:
             self._note_tokens.popitem(last=False)

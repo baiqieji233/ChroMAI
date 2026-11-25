@@ -11,7 +11,7 @@ from functools import lru_cache
 
 from maichart.event_timing import EventPoint
 from maichart.composer.event_set_codec import _atoms
-from maichart.notes import parse_timing_point_notes
+from maichart.notes import expand_compact_taps, parse_timing_point_notes
 from maichart.timing import RawTimingPoint
 from maichart.duration import parse_duration_expr
 
@@ -56,7 +56,8 @@ def render_atom(tokens):
         if token.startswith(('P:','S:')):pieces.append(token[2:])
         else:raise ValueError('Unknown component '+token)
     if duration is not None:raise ValueError('Truncated duration')
-    return ''.join(pieces)
+    text = ''.join(pieces)
+    return '/'.join(expand_compact_taps(text)) if tokens[0] == 'N:tap' else text
 
 
 def template(tokens):
@@ -72,11 +73,22 @@ def template(tokens):
 def component_inventory(texts):
     values, patterns = set(), set()
     for text in dict.fromkeys(texts):
-        for atom in _atoms(text):
+        for atom in explicit_note_atoms(text):
             parts = atom_components(atom)
             values.update(parts)
             patterns.add(template(parts))
     return values, patterns
+
+
+@lru_cache(maxsize=8192)
+def explicit_note_atoms(text):
+    return tuple(sorted(child for atom in _atoms(text) for child in expand_compact_taps(atom)))
+
+
+def _single_head_template(pattern):
+    if pattern[0] == 'N:tap' and pattern.count('<button>') > 1:
+        return ('N:tap', '<button>', *(field for field in pattern[1:] if field != '<button>'))
+    return tuple(pattern)
 
 
 def _duration_prefix(kind,body):
@@ -102,6 +114,7 @@ class VocabularyCoverageError(ValueError):
 
 class ComponentCodec:
     schema='composer_v2_components_v2'
+    note_atoms = staticmethod(explicit_note_atoms)
     def __init__(self,tokens,templates,ticks_per_beat=48,window_beats=16):
         self.tokens=list(tokens);self.ids={t:i for i,t in enumerate(tokens)}
         self.templates=tuple(tuple(x) for x in templates)
@@ -157,7 +170,7 @@ class ComponentCodec:
         origin=Fraction(origin);result=[]
         for point in sorted(points,key=lambda x:x.beat):
             result.extend(self._time(point.beat-origin))
-            for atom in _atoms(point.note_text):result.extend(self.encode_atom(atom))
+            for atom in self.note_atoms(point.note_text):result.extend(self.encode_atom(atom))
         return result
 
     def token_clocks(self,ids):
@@ -234,9 +247,22 @@ class ComponentCodec:
 
     def to_dict(self):return dict(schema=self.schema,tokens=self.tokens,templates=self.templates,ticks_per_beat=self.ticks_per_beat,window_beats=self.window_beats)
     @classmethod
-    def from_dict(cls,value):
+    def from_dict(cls,value, *, explicit_taps=False):
         from .stream_codec import StreamCodec
+        patterns = value['templates']
+        has_compact = any(p[0] == 'N:tap' and p.count('<button>') > 1 for p in patterns)
+        if explicit_taps and has_compact:
+            # A sampled Tap ends after one button and its modifiers. A chord
+            # can then continue with another Tap at the same event time.
+            singles = {_single_head_template(p) for p in patterns}
+            singles.add(('N:tap', '<button>', '[END_NOTE]'))
+            patterns = sorted(singles)
         if value.get('schema')==StreamCodec.schema:
-            return StreamCodec(value['tokens'],value['templates'],value['ticks_per_beat'],value.get('window_beats',16))
-        if value.get('schema')!=cls.schema:raise ValueError('Incompatible v2 component vocabulary')
-        return cls(value['tokens'],value['templates'],value['ticks_per_beat'],value['window_beats'])
+            codec = StreamCodec(value['tokens'],patterns,value['ticks_per_beat'],value.get('window_beats',16))
+        elif value.get('schema')==cls.schema:
+            codec = cls(value['tokens'],patterns,value['ticks_per_beat'],value['window_beats'])
+        else:
+            raise ValueError('Incompatible v2 component vocabulary')
+        if has_compact and not explicit_taps:
+            codec.note_atoms = _atoms  # Preserve the token layout of legacy resume/evaluation.
+        return codec

@@ -545,7 +545,7 @@ def write_previews(output, number, prefix, trials, evidence, song, tempo, level)
         text, _ = compile_event_points(points, tempo_changes=[t for t in tempo if t.beat <= finish],
             bpm=tempo[0].bpm, first=song.clock.seconds[0], end_beat=finish,
             title=f'{song.song_id} 候选片段 {number+1}-{index+1}', level=str(level),
-            designer='Composer v2 partial trial', strict_notes=False)
+            designer='Composer v2 partial trial', strict_notes=False, explicit_taps=True)
         path = directory / f'trial_{number+1:06d}_{index}_{snapshot}.txt'
         with path.open('x',encoding='utf-8') as handle:handle.write(text)
         evidence['candidates'][index]['path'] = str(path.resolve())
