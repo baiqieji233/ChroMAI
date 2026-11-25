@@ -31,6 +31,7 @@ def parser():
     result = argparse.ArgumentParser(description=__doc__)
     for name in ('checkpoint', 'audio', 'output'):
         result.add_argument('--' + name, required=True)
+    result.add_argument('--song-package', action='store_true', help='Export matching track audio beside maidata.txt')
     result.add_argument('--cache-dir', default='cache/chart_composer_v2')
     result.add_argument('--bpm', type=float, default=None, help='Omit to detect tempo changes automatically; use --tempo-map for an explicit clock')
     result.add_argument('--first', type=float, default=None, help='Omit to detect beat phase; explicit zero is preserved')
@@ -391,6 +392,11 @@ def _sampling_policy(args):
 @torch.inference_mode()
 def generate(args, *, model_override=None, payload_override=None, audio_store_override=None, prepared_override=None):
     from .generation_progress import get_progress
+    if getattr(args, 'song_package', False):
+        from .song_package import track_path
+        if Path(args.output).name != 'maidata.txt':
+            raise ValueError('--song-package requires an output named maidata.txt')
+        track_path(args.audio, Path(args.output).parent)
     progress=get_progress(args)
     progress.update(force=True,stage='loading_checkpoint' if payload_override is None else 'generating')
     strength=getattr(args,'intensity_strength',1.)
@@ -609,6 +615,9 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         difficulty=chart_meta['difficulty'], level=chart_meta['level_label'], strict_notes=False, explicit_taps=True)
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
+    if getattr(args, 'song_package', False):
+        from .song_package import export_track
+        export_track(audio_path, output.parent)
     output.write_text(text, encoding='utf-8')
     metadata = dict(family='chart_composer_v2', checkpoint=str(Path(args.checkpoint).resolve()),
         checkpoint_info=checkpoint_info,cpu_runtime=args.cpu_runtime,
