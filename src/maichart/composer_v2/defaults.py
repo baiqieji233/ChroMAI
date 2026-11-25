@@ -35,7 +35,7 @@ FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', 'ordered_future_v1', 'audio_writi
                                 *GRID_WRITING_POLICIES, FUTURE_CONFIGURATION_POLICY)
 FUTURE_CONFIGURATION_WEIGHT = .05
 FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION = .25
-FINETUNE_SCOPE_CHOICES = ('auto', 'all', 'music_reading')
+FINETUNE_SCOPE_CHOICES = ('auto', 'all', 'music_reading', 'intent_only')
 
 
 def configuration_view_fraction(policy):
@@ -104,17 +104,23 @@ def resolve_auxiliary_policy(requested, value, *, feature, choices, default,
     return policy, float(value)
 
 
-def resolve_finetune_scope(requested, parent_contract, *, resume, initialized):
+def resolve_finetune_scope(requested, parent_contract, *, resume, initialized,
+                           intent_policy='off', previous_intent='off'):
     if requested not in FINETUNE_SCOPE_CHOICES:
         raise ValueError('Unknown fine-tuning scope')
     saved = parent_contract.get('finetune_scope', 'all')
     scope = (saved if resume else 'all') if requested == 'auto' else requested
+    if (requested == 'auto' and initialized and not resume and intent_policy != 'off'
+            and (previous_intent == 'off' or saved == 'intent_only')):
+        scope = 'intent_only'
     if scope not in FINETUNE_SCOPE_CHOICES[1:]:
         raise ValueError('Unknown saved fine-tuning scope')
     if resume and scope != saved:
         raise ValueError('Changing fine-tuning scope requires --init-checkpoint in a new directory')
     if scope == 'music_reading' and not (initialized or resume):
         raise ValueError('Music-reading fine-tuning requires --init-checkpoint')
+    if scope == 'intent_only' and (intent_policy == 'off' or not (initialized or resume)):
+        raise ValueError('仅训练编排构思需要在微调时启用编排构思，或沿用该实验的断点续训')
     return scope
 
 

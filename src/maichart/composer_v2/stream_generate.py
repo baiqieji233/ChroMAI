@@ -84,7 +84,8 @@ def _duration_head_pulse(codec, atom):
 
 
 class EventSampler(WindowSampler):
-    def __init__(self,model,dataset,song,points,device,rng,args,*,action_generator=None,history_exclude=()):
+    def __init__(self,model,dataset,song,points,device,rng,args,*,action_generator=None,history_exclude=(),
+                 intent_options=None):
         self.progress=getattr(args,'_generation_progress',None)
         self.model=model;self.codec=model.codec;self.dataset=dataset;self.song=song
         self.device=device;self.generator=rng;self.temperature=args.temperature;self.top_p=args.top_p
@@ -104,7 +105,11 @@ class EventSampler(WindowSampler):
         self.batch['onset_strength'] = effective_strength(getattr(args,'onset_strength',None),
             getattr(model.config,'onset_readout_policy','off'))
         self.batch['intensity_strength']=getattr(args,'intensity_strength',1.)
+        if intent_options is not None:
+            self.batch.update(intent_options)
         self.max_tokens=model.config.max_tokens;self.cache=model.encode_audio(self.batch)
+        if intent_options is not None and 'intent_plan' not in intent_options:
+            intent_options['intent_plan'] = self.cache.get('intent_plan')
         if getattr(model.config,'intensity_policy','off')!='off' and not hasattr(dataset,'intensity_profile'):
             from .intensity import serialize,blend_profile
             dataset.intensity_profile=blend_profile(serialize(self.cache['curve_context'][0].expm1(),song),
@@ -679,6 +684,16 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         and not sampling_policy['fully_greedy'])
     args._candidate_audit_active=candidate_count>1
     sampler_options={}
+    from .intent_policy import POLICY as INTENT_POLICY
+    intent_mode = getattr(args, 'intent_mode', 'auto')
+    checkpoint_intent = getattr(config, 'intent_policy', 'off')
+    if intent_mode == 'auto' and checkpoint_intent == INTENT_POLICY:
+        # This mapping caches the first plan across all samplers in this run.
+        # Intent sampling derives its own stream without advancing timing or action RNG.
+        sampler_options['intent_options'] = dict(
+            intent_mode='soft', intent_seed=rng.initial_seed() ^ 0xA0761D6478BD642F,
+            intent_song_keys=[audio.identity.get('audio_sha256') or ''],
+            intent_track_execution=True)
     if sampling_policy['rng_policy']=='separate_timing_action_v1':
         # Keep both streams alive across context refreshes and conflict retries.
         action_seed=rng.initial_seed() ^ 0x9E3779B97F4A7C15
@@ -688,7 +703,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     def make_sampler(history, *, trial_rng=None, extra_omissions=frozenset()):
         boundary=history[-1].beat-dataset.history_beats if history else Fraction(0)
         omissions=frozenset(beat for beat in omitted_history | extra_omissions if beat>=boundary)
-        options=dict(sampler_options) if trial_rng is None else {}
+        options=dict(sampler_options)
+        if trial_rng is not None:
+            options.pop('action_generator', None)
         if omissions:
             options['history_exclude']=omissions
         value=EventSampler(model,dataset,song,history,device,rng if trial_rng is None else trial_rng,args,**options)
@@ -1013,6 +1030,12 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
     report['cpu_runtime']=getattr(args,'cpu_runtime',None)
+    intent_plan = sampler_options.get('intent_options', {}).get('intent_plan')
+    report['phrase_intent'] = dict(requested=intent_mode, policy=checkpoint_intent,
+        status='off' if intent_plan is None else 'selected' if intent_plan.strength > 0 else 'abstained')
+    if intent_plan is not None:
+        report['phrase_intent'].update(intent_plan.diagnostics)
+        report['phrase_intent'].update(intent_plan.execution_diagnostics())
     report['reference_strength']=getattr(args,'reference_strength',1.)
     report['recent_configuration_strength']=getattr(args,'recent_configuration_strength',1.)
     guidance=getattr(song,'_condition_guidance',None)
@@ -1083,5 +1106,5 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 def _generation_settings(args,device):
     keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','reference_strength','recent_configuration_strength','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
-        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','radar_style_guidance','eos_suppression','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend')
+        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','radar_style_guidance','eos_suppression','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend','intent_mode')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

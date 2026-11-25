@@ -9,7 +9,7 @@ import tempfile
 import time
 import torch
 from .codec import ComponentCodec
-from . import spatial_policy
+from . import intent_policy, spatial_policy
 from .conditions import LEVEL_ONLY,RADAR_STYLE,condition_contract,policy_from_config
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, configuration_view_fraction,
@@ -88,6 +88,17 @@ def inspect_payload(payload):
     saved_training = training if isinstance(training, dict) else {}
     model_fields = config if isinstance(config, dict) else {}
     continuous = model_fields.get('sequence_policy') == 'continuous_events_v1'
+    intent = model_fields.get('intent_policy', 'off')
+    if (intent not in intent_policy.CHOICES[1:] or (intent != 'off' and not continuous)
+            or isinstance(training, dict) and saved_training.get('intent_policy', 'off') != intent):
+        errors.append('编排构思设置与模型或训练合同不一致')
+    weights = payload.get('model_state_dict')
+    if isinstance(weights, dict) and intent == intent_policy.POLICY:
+        from .intent import VARIANTS, WIDTH
+        for name, shape in (('intent.codebook', (VARIANTS, WIDTH)),
+                            ('intent.execute.weight', (model_fields.get('d_model'), WIDTH))):
+            if not isinstance(weights.get(name), torch.Tensor) or tuple(weights[name].shape) != shape:
+                errors.append('编排构思权重缺失或形状不匹配：' + name)
     relation_policy = saved_training.get('musical_relation_policy', 'off')
     relation_fraction = saved_training.get('musical_relation_fraction', MUSICAL_RELATION_FRACTION)
     future_policy = model_fields.get('future_configuration_policy', 'off')
@@ -116,7 +127,8 @@ def inspect_payload(payload):
             or saved_training.get('future_configuration_train_view_fraction', future_train_view_fraction)
             != future_train_view_fraction):
         errors.append('Ordered future training contract does not match model configuration')
-    if scope not in FINETUNE_SCOPE_CHOICES[1:] or (scope == 'music_reading' and not continuous):
+    if (scope not in FINETUNE_SCOPE_CHOICES[1:] or (scope == 'music_reading' and not continuous)
+            or (scope == 'intent_only' and intent == 'off')):
         errors.append('Invalid Composer v2 fine-tuning scope')
     if isinstance(config,dict):
         if config.get('attention_normalization', 'off') not in ('off', 'qk_rms_v1'):
@@ -185,6 +197,7 @@ def inspect_payload(payload):
         vocab_size=len(tokens) if not errors else None,
         training_contract=payload.get("training_contract") or {},
         training_capabilities=dict(musical_relation_policy=relation_policy, musical_relation_fraction=relation_fraction,
+            intent_policy=intent,
             spatial_policy=spatial,
             future_configuration_policy=future_policy, future_configuration_weight=future_weight,
             future_configuration_train_view_fraction=future_train_view_fraction, finetune_scope=scope),
@@ -196,6 +209,7 @@ def inspect_payload(payload):
         condition_contract=capabilities_contract,
         sequence_policy=model_fields.get('sequence_policy','window_v1'),
         generation_capabilities=dict(component_sequence=True,fine_note_strength=False,local_onset_guidance=False,
+            phrase_intent=intent == intent_policy.POLICY,
             local_writing_condition=future_policy in AUDIO_WRITING_POLICIES,
             motion_and_entry_condition=future_policy in MOTION_WRITING_POLICIES,
             intensity_curve=model_fields.get('intensity_policy','off')=='rate_curve_v1',

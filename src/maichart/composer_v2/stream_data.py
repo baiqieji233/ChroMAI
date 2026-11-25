@@ -35,7 +35,14 @@ class StreamDataset(ComposerV2Dataset):
                  local_audio_block_beats=1,training_window_events=None,
                  musical_context_policy='off',musical_context_probability=MUSICAL_CONTEXT_PROBABILITY,
                  musical_relation_policy='off', musical_relation_fraction=.3,
-                 future_configuration_policy='off', auxiliary_validation=False, spatial_policy='off', **kwargs):
+                 future_configuration_policy='off', auxiliary_validation=False, spatial_policy='off',
+                 intent_policy='off', **kwargs):
+        from .intent_policy import POLICY as INTENT_POLICY
+        if intent_policy not in ('off', INTENT_POLICY):
+            raise ValueError('Unknown phrase intent policy')
+        self.intent_policy = intent_policy
+        if intent_policy != 'off':
+            self._intent_chart_cache = OrderedDict()
         if type(local_audio_block_beats) is not int or local_audio_block_beats not in (1, 2):
             raise ValueError('local_audio_block_beats must be 1 or 2')
         if musical_context_policy not in musical_context.POLICIES:
@@ -195,6 +202,16 @@ class StreamDataset(ComposerV2Dataset):
         self.audit.update(windows=len(self.windows),sequence_policy=POLICY,
             segmentation='whole_events_compute_only',refresh_events=self.refresh_events,eos='true_chart_end_only',
             reviewed_reference_policy=self.reviewed_reference_policy)
+        if intent_policy != 'off':
+            from .intent_data import (FIELDS, FUTURE_MIN_GAP_BEATS, FUTURE_VIEW_PERIOD,
+                                      MAX_PHRASES, MIN_SUPPORT_BEATS, PHRASE_BEATS, STEPS)
+            self.audit['phrase_intent'] = dict(policy=intent_policy, max_beats=PHRASE_BEATS, steps=STEPS,
+                min_support_beats=MIN_SUPPORT_BEATS, max_support=MAX_PHRASES - 1,
+                fields=FIELDS, query='held_out_authored_ce_slice',
+                support='same_chart_authored_teacher_only_without_ctx_carry_or_ref_overlap',
+                future_min_gap_beats=FUTURE_MIN_GAP_BEATS, future_views_fraction=1 / FUTURE_VIEW_PERIOD,
+                future_support='one_separate_demo_after_ce_slice_without_incoming_sustain',
+                quality='continuous_timing_and_layout_with_explicit_zero_unmarked_approval')
         if self.training_window_events != self.refresh_events:
             self.audit['training_window_events'] = self.training_window_events
         self.audit['timing_recovery'] = dict(policy=timing_recovery_policy, views=len(self.recovery_sources),
@@ -479,7 +496,7 @@ class StreamDataset(ComposerV2Dataset):
         return result
     def build_stream(self,song,points,cursor,*,target=(),ended=False,training=False,
                      reference_start=_SELECT_REFERENCE,_prefix_end=None,context_recent_beats=None,
-                     _reference_index=None,history_exclude=()):
+                     _reference_index=None,history_exclude=(),_track_intent_overlap=False):
         cursor=Fraction(cursor);boundary=max(Fraction(0),cursor-self.history_beats)
         if _prefix_end is None:
             known = list(points)
@@ -503,9 +520,9 @@ class StreamDataset(ComposerV2Dataset):
             return {Fraction(m['source_beat']) for m in state._candidate_markers(second)
                 if m['source_beat']<=cursor and float(m['end_second'])>second}
         older=active_sources(boundary)
-        active=active_sources(cursor)
+        active_carry_sources=active_sources(cursor)
         if history_exclude:
-            history=[p for p in history if p.beat not in history_exclude or p.beat in active]
+            history=[p for p in history if p.beat not in history_exclude or p.beat in active_carry_sources]
         carry = []
         if _prefix_end is None:
             carry = [p for p in known if p.beat < boundary and p.beat in older]
@@ -520,7 +537,7 @@ class StreamDataset(ComposerV2Dataset):
         carry_ids = codec.encode_points(carry)
         shortened_ids = None
         if training and context_recent_beats is not None:
-            shortened = musical_context.shorten_history(history, cursor, context_recent_beats, active)
+            shortened = musical_context.shorten_history(history, cursor, context_recent_beats, active_carry_sources)
             if len(shortened) < len(history):
                 candidate = codec.encode_points(shortened)
                 if 5 + len(carry_ids) + len(candidate) <= budget:
@@ -600,7 +617,7 @@ class StreamDataset(ComposerV2Dataset):
             while prefix_length > budget and kept_start < len(history):
                 removed = history[kept_start]
                 kept_start += 1
-                if removed.beat in active and removed.beat not in carried_beats:
+                if removed.beat in active_carry_sources and removed.beat not in carried_beats:
                     carry.append(removed)
                     carried_beats.add(removed.beat)
                 else:
@@ -764,8 +781,20 @@ class StreamDataset(ComposerV2Dataset):
             out['entry_preview_features']=torch.as_tensor(entry_preview(profile,anchors))
         if getattr(self,'future_configuration_policy','off') in AUDIO_WRITING_POLICIES:
             out.update(self.writing_features(song,anchors))
+        if _track_intent_overlap:
+            reference_spans = []
+            if aligned is not None:
+                shift = aligned[0]
+                start = min(checked_start - shift, reference[0].beat - shift) if reference else checked_start - shift
+                stop = max(checked_end - shift, reference[-1].beat - shift + 1) if reference else checked_end - shift
+                reference_spans.append((start, stop))
+            elif reference_ids and reference_start is not None:
+                reference_spans.append((reference_start, reference_start + self.window_beats))
+            blocked_beats = active_carry_sources | {point.beat for point in carry}
+            out['_intent_blocked'] = blocked_beats, reference_spans
         return out
     def __getitem__(self,index):
+        has_intent = getattr(self, 'intent_policy', 'off') != 'off'
         replay = getattr(self, 'generated_prefix_views', None)
         if replay is not None:
             from .generated_prefix import item
@@ -773,7 +802,11 @@ class StreamDataset(ComposerV2Dataset):
             return item(self, replay[index], si, begin, self.ranges[index])
         source = self.recovery_sources.get(index)
         if source is not None:
-            return self._recovery_item(source)
+            item = self._recovery_item(source)
+            if has_intent:
+                from .intent_data import empty_item
+                item.update(empty_item())
+            return item
         si,begin=self.windows[index];song=self.songs[si];end=self.ranges[index]
         cursor=song.points[begin-1].beat if begin else Fraction(0)
         recent_beats = None
@@ -788,7 +821,7 @@ class StreamDataset(ComposerV2Dataset):
         item = self.build_stream(song, song.points, cursor, target=song.points[begin:end],
                                  ended=end==len(song.points), training=True,
                                  _reference_index=index,_prefix_end=begin,
-                                 context_recent_beats=recent_beats)
+                                 context_recent_beats=recent_beats,_track_intent_overlap=has_intent)
         scores = getattr(self, '_relation_scores', None)
         if scores is not None and scores[index] > 0:
             fraction = self.musical_relation_fraction
@@ -805,6 +838,10 @@ class StreamDataset(ComposerV2Dataset):
                     item[field] = item[field].clone()
                     item[field][1:] = 0
                 item['curve_teacher_allowed'] = False
+        if has_intent:
+            from .intent_data import FUTURE_VIEW_PERIOD, add_item
+            allow_future = (index + self.training_epoch) % FUTURE_VIEW_PERIOD == 1
+            add_item(item, self, si, song, begin, end, allow_future=allow_future)
         return item
 
     def _use_future_configuration(self, index):
@@ -962,4 +999,7 @@ def collate_stream(items):
         out['phase_queries_cpu']=queries
     phrase_replay.collate(items,out)
     gesture_pairs.collate(items,out)
+    if any('intent_phrase_bounds' in item for item in items):
+        from .intent_data import collate as collate_intent
+        collate_intent(items, out)
     return out

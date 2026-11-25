@@ -7,8 +7,8 @@ const V2_JOINT_DEVELOPMENT_FIELDS = [
 ];
 const V2_PREFIX_FIELDS = ['generated_prefix_mode', 'generated_prefix_bank'];
 const V2_INHERITED_LEARNING_FIELDS = [...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS,
-  ...V2_PREFIX_FIELDS, 'timing_recovery', 'lr_decay_end_step'];
-COMPOSER_V2_FIELDS.push(...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS, 'lr_decay_end_step', ...V2_PREFIX_FIELDS);
+  ...V2_PREFIX_FIELDS, 'timing_recovery', 'lr_decay_end_step', 'intent_policy'];
+COMPOSER_V2_FIELDS.push(...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS, 'lr_decay_end_step', 'intent_policy', ...V2_PREFIX_FIELDS);
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -32,11 +32,12 @@ function composerV2TrainingPayload(options={}) {
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
   const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy","difficulty_source","open_mdp_dir","chartgate_dir","batch_layout","local_audio_block_beats","attention_projection_packing","decoder_flash_attention"]);
   strings.add("musical_context");
-  for(const key of ["musical_relation_policy", "future_configuration_policy", "spatial_policy", "finetune_scope"])strings.add(key);
+  for(const key of ["musical_relation_policy", "future_configuration_policy", "spatial_policy", "finetune_scope", "intent_policy"])strings.add(key);
   for(const key of V2_PREFIX_FIELDS)strings.add(key);
   for(const key of COMPOSER_V2_FIELDS) {
     if(key==='song_layers' && payload.mode!=='fresh')continue;
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
+    if(raw && key==='intent_policy' && element('#v2TrainIntentPolicy')?.disabled)continue;
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
   }
   // Disabled automatic-split controls must not override an explicit manual
@@ -45,6 +46,9 @@ function composerV2TrainingPayload(options={}) {
   if(payload.musical_context==='off')delete payload.musical_context_probability;
   if(payload.musical_relation_policy==='off')delete payload.musical_relation_fraction;
   if(payload.future_configuration_policy==='off')delete payload.future_configuration_weight;
+  if(payload.mode==='finetune' && payload.future_configuration_weight===0.05
+      && element('#v2TrainFutureConfigurationWeight')?.dataset.touched!=='1')
+    delete payload.future_configuration_weight;
   if(payload.mode!=='finetune')delete payload.finetune_scope;
   if(payload.lr_schedule==='constant')delete payload.lr_decay_end_step;
   if(payload.mode!=='finetune') {
@@ -161,6 +165,8 @@ function composerV2GenerationPayload(options={}) {
     if (strength !== 1) payload[key] = strength;
   }
   const legacyWindow=element('#v2GeneratePhraseSearch')?.disabled;
+  const intent=element('#v2GenerateIntentMode');
+  if(intent && !intent.disabled && intent.value==='off')payload.intent_mode='off';
   const ranking=valueOrDefault('#v2GeneratePhraseRankPolicy','auto');
   if(legacyWindow || ranking!=='auto')payload.phrase_rank_policy=legacyWindow?'comfort_v1':ranking;
   if(payload.phrase_search==='auto')delete payload.phrase_search;
@@ -334,6 +340,8 @@ function requireV2ExhaustionSupport(status,payload) {
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
 function requireV2SplitSamplingSupport(status,payload) {
+  if(payload.intent_mode==='off' && !status.training_capabilities?.composer_v2_phrase_intent)
+    throw new Error('关闭编排构思的对照选项需要新版 WebUI 后台。');
   if(payload.eos_suppression && !status.training_capabilities?.composer_v2_eos_suppression)
     throw new Error('请重启更新后的 WebUI，再启用提前结束抑制。');
   if(payload.radar_style_guidance && !status.training_capabilities?.composer_v2_radar_style_guidance)
@@ -492,6 +500,7 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   saved.future_configuration_policy = data.model_config?.future_configuration_policy ?? 'off';
   saved.future_configuration_weight = data.model_config?.future_configuration_weight ?? 0.05;
   saved.spatial_policy = data.model_config?.spatial_policy ?? 'off';
+  saved.intent_policy = data.model_config?.intent_policy ?? 'off';
   saved.finetune_scope = data.training_contract?.finetune_scope ?? 'all';
   saved.timing_recovery = data.training_contract?.timing_recovery ?? 'off';
   saved.lr_decay_end_step = data.training_contract?.lr_decay_end_step ?? 0;
@@ -1110,6 +1119,7 @@ function composerV2TrainingView(task) {
         ? `已启用 · 乐句强化上限 ${show(n(runtime,'musical_relation_fraction')*100,1)}%`
         : runtime.musical_relation_policy==='off' ? '关闭' : '未记录'],
       ['盘面走势学习',({disk_geometry_v1:'Slide 轨迹与前文走势',slide_geometry_v1:'仅 Slide 轨迹'})[runtime.spatial_policy ?? config.spatial_policy] || '关闭'],
+      ['编排构思学习',(runtime.intent_policy ?? config.intent_policy ?? settings.intent_policy)==='phrase_intent_v1'?'已启用（实验）':'关闭'],
       ['局部写法学习',runtime.future_configuration_policy==='audio_writing_v4'
         ? `乐句衔接与留白 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
         :runtime.future_configuration_policy==='audio_grid_v4'
@@ -1121,7 +1131,7 @@ function composerV2TrainingView(task) {
         : runtime.future_configuration_policy==='ordered_future_v1'
         ? `旧版配置预判 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
         : runtime.future_configuration_policy==='off' ? '关闭' : '未记录'],
-      ['微调范围',({all:'全部参数',music_reading:'音乐读取连接'})[runtime.finetune_scope]||'未记录'],
+      ['微调范围',({all:'全部参数',music_reading:'音乐读取连接',intent_only:'仅编排构思'})[runtime.finetune_scope ?? settings.finetune_scope]||'未记录'],
       ['音频特征',runtime.audio_backend||'未记录']]],
     ['吞吐与计时（本次运行累计）',[
       ['token / 秒',show(n(metrics,'tokens_per_sec'),1)],['片段 / 秒',show(n(metrics,'samples_per_sec'),1)],
@@ -1142,6 +1152,15 @@ function composerV2TrainingView(task) {
       ['训练写法 loss',show(n(metrics,'future_configuration_loss'))],
       ['验证写法 loss',show(n(complete,'validation_future_configuration_loss'))]];
     cards.push(['局部写法学习',rows]);
+  }
+  if((runtime.intent_policy ?? config.intent_policy ?? settings.intent_policy)==='phrase_intent_v1') {
+    cards.push(['编排构思学习',[
+      ['训练构思 loss',show(n(metrics,'intent_loss'))],
+      ['验证构思 loss',show(n(complete,'validation_intent_loss'))],
+      ['构思监督覆盖率',show(n(metrics,'intent_teacher_coverage'))],
+      ['构思引导强度',show(n(metrics,'intent_execution_strength'))],
+      ['候选分数改变量',show(n(metrics,'intent_logit_shift'))],
+      ['验证误差（原示范 / 倒序示范）',show(n(complete,'validation_intent_reconstruction_loss'))+' / '+show(n(complete,'validation_intent_shuffled_support_loss'))]]]);
   }
   const spatial=runtime.spatial_policy ?? config.spatial_policy ?? settings.spatial_policy;
   const checks=new Map();
@@ -1820,7 +1839,7 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
-  "v2GenerateConfigurationRecovery", "v2RadarStyleGuidance", "v2GenerateEosSuppression",
+  "v2GenerateConfigurationRecovery", "v2RadarStyleGuidance", "v2GenerateEosSuppression", "v2GenerateIntentMode",
   "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2EvalWritingProbe", "v2EvalBatchManifest", "v2AuditInput",
   "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateReferenceStrength", "v2GenerateRecentConfigurationStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
   "tempoMode", "division",                                  // 节拍与时间轴
@@ -2042,6 +2061,7 @@ function collectSettings() {
   values.__manualTouched = {
     learningRate: element("#learningRate")?.dataset.touched === "1",
     contextTokens: element("#contextTokens")?.dataset.touched === "1",
+    v2FutureConfigurationWeight: element('#v2TrainFutureConfigurationWeight')?.dataset.touched === '1',
   };
   values.__songFormEvidenceProvenance = Object.fromEntries([
     "formQualityProfile", "formPositionAlignmentLossWeight", "formPositionAlignmentToleranceMs",
@@ -2237,6 +2257,8 @@ function restoreSettings() {
       || (manualTouched.learningRate === undefined && inferLegacyTouched) ? "1" : "";
   }
   if (contextTokens) contextTokens.dataset.touched = manualTouched.contextTokens === true ? "1" : "";
+  const futureWeight = element('#v2TrainFutureConfigurationWeight');
+  if (futureWeight) futureWeight.dataset.touched = manualTouched.v2FutureConfigurationWeight === true ? '1' : '';
   for (const [id, provenance] of Object.entries(values.__songFormEvidenceProvenance || {})) {
     if (!["formQualityProfile", "formPositionAlignmentLossWeight", "formPositionAlignmentToleranceMs",
       "formPlannerContextSeconds", "formCurveBinSeconds"].includes(id)) continue;
@@ -2898,6 +2920,15 @@ function updateFamilyFields() {
   for(const field of document.querySelectorAll('[data-v2-phrase-search]')) {
     field.hidden=!v2Generation;
     field.querySelector('input,select').disabled=!splitSampling;
+  }
+  const intentEnabled=splitSampling && (!checked || generationInspection.data?.generation_capabilities?.phrase_intent);
+  const intentField=element('[data-v2-phrase-intent]');
+  if(intentField) {
+    intentField.hidden=!v2Generation;
+    intentField.querySelector('select').disabled=!intentEnabled;
+    element('#v2GenerateIntentHelp').textContent=checked && !intentEnabled
+      ? '此检查点未启用编排构思学习。'
+      : '每张谱面从音乐与目标难度选一次构思，写谱过程中沿用。';
   }
   updateV2BatchControls();
   const phraseHelp=element('#v2PhraseSearchHelp');
@@ -4312,6 +4343,17 @@ function updateTrainingControls() {
     }
   }
   const v2LocalAudio=element('#v2TrainLocalAudioBlockBeats');
+  const intentField=element('#v2TrainIntentPolicy');
+  if(intentField) {
+    const inspected=checkpointInspection.key===currentCheckpointKey() && checkpointInspection.data?.valid
+      ? checkpointInspection.data : null;
+    const windowModel=currentTrainingMode()!=='fresh' && inspected?.sequence_policy==='window_v1';
+    if(windowModel)intentField.disabled=true;
+    element('#v2TrainIntentHelp').textContent=v2Resume
+      ? '断点续训沿用检查点的编排构思设置。'
+      : windowModel ? '此设置适用于连续事件模型。'
+      : '用真人谱面学习乐句走向，生成时据整首音乐和目标难度选构思。从已有模型启用时请选择微调和新输出目录。';
+  }
   const decayEnd=element('#v2TrainLrDecayEndStep');
   if(decayEnd && element('#v2TrainLrSchedule')?.value==='constant')decayEnd.disabled=true;
   const prefixMode=element('#v2TrainGeneratedPrefixMode');
@@ -4770,7 +4812,11 @@ function composerGenerationSummary(task) {
       : '';
     const rankPolicy=report.phrase_search?.ranking_policy??report.phrase_search?.rank_policy;
     const rankSummary=rankPolicy==='music_plan_v1'?'按音乐与预测动作选优；':rankPolicy==='music_flow_v1'?'按音乐选优；':rankPolicy==='likelihood_veto_v1'?'似然重排＋手感底线降序；':rankPolicy==='comfort_v2'?'左右手手感评分；':'';
-    return `Composer v2；实际 seed ${report.seed??settings.seed??"未记录"}；${settingsSummary}${rankSummary}候选数 ${report.candidates??settings.candidates??"未记录"}；${scope}冲突恢复预算 ${report.recovery_budget??report.rollback_windows??settings.rollback_windows??2} 次；全曲实际撤回 ${report.rollbacks?.length??0} 次，Hold时值修复 ${report.duration_repairs?.length??0} 次；放行冲突事件 ${report.accepted_with_conflicts_count??0} 个；详见 .composer_v2.json 和冲突报告，仍需试听与游玩检查。`;
+    const intent=report.phrase_intent;
+    const intentSummary=({selected:intent?.max_logit_shift>0?'构思已引导局部试写；':'已选编排构思；',
+      abstained:'构思未通过适用性判断；'})[intent?.status]
+      ?? (intent?.requested==='off'?'已关闭编排构思；':'');
+    return `Composer v2；实际 seed ${report.seed??settings.seed??"未记录"}；${settingsSummary}${rankSummary}${intentSummary}候选数 ${report.candidates??settings.candidates??"未记录"}；${scope}冲突恢复预算 ${report.recovery_budget??report.rollback_windows??settings.rollback_windows??2} 次；全曲实际撤回 ${report.rollbacks?.length??0} 次，Hold时值修复 ${report.duration_repairs?.length??0} 次；放行冲突事件 ${report.accepted_with_conflicts_count??0} 个；详见 .composer_v2.json 和冲突报告，仍需试听与游玩检查。`;
   }
   if (task.kind !== "composer_generate") return null;
   const result=task.result||{},report=result.composer_report||{},settings=result.effective_settings||{};
@@ -6810,6 +6856,8 @@ async function submitTrain(options = {}) {
     if(options.autoPreprocess)throw new Error("Composer v2 请先准备训练 manifest");
     const backend=await api("/api/status");
     assertV2AutoQualitySources(payload,backend.training_capabilities);
+    if((payload.intent_policy ?? 'auto')!=='auto' && !backend.training_capabilities?.composer_v2_phrase_intent)
+      throw new Error('显式选择编排构思学习需要新版 WebUI 后台。');
     if(payload.mode!=='resume' && payload.musical_context && payload.musical_context!=='off'
         && backend.training_capabilities?.composer_v2_musical_context!==true)
       throw new Error('按音乐组织配置需要新版 WebUI 后台，请重启后台后提交。');
@@ -8976,6 +9024,7 @@ if (intensityCurveState.profile) {
     if (!target || !target.id || target.type === "file") return;
     if (target.id === "learningRate") target.dataset.touched = "1";
     if (target.id === "contextTokens") target.dataset.touched = "1";
+    if (target.id === 'v2TrainFutureConfigurationWeight') target.dataset.touched = '1';
     if (["formQualityProfile", "formPositionAlignmentLossWeight", "formPositionAlignmentToleranceMs",
       "formPlannerContextSeconds", "formCurveBinSeconds"].includes(target.id)) markSongFormEvidenceInput(target);
     if (target.id === "fineNoteStrength") {

@@ -80,6 +80,8 @@ def parser():
         help='auto: layout on continuous models, event on window models; layout: compare configurations on shared timings; hybrid: shared beat with free cardinality (+ joint branch at 4); joint: compare timing and configuration; event: fast single-event trials')
     result.add_argument('--phrase-rank-policy', choices=('auto',*RANK_POLICIES), default='auto',
         help='auto: music_flow_v1 on continuous models and comfort_v1 on window models; music_flow_v1 compares selected attacks and relative accents; music_plan_v1 also compares predicted local motions')
+    result.add_argument('--intent-mode', choices=('auto', 'off'), default='auto',
+        help='Use the checkpoint’s learned phrase intent when available, or disable it for a comparison run')
     result.add_argument('--phrase-beats',type=float,default=GENERATION_DEFAULTS['phrase_beats'])
     result.add_argument('--phrase-commit-beats',type=float,default=GENERATION_DEFAULTS['phrase_commit_beats'])
     result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts with independent consecutive seeds')

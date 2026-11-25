@@ -9,7 +9,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from maichart.portable_paths import material_path
-from maichart.composer_v2 import spatial_policy
+from maichart.composer_v2 import intent_policy, spatial_policy
 from .composer_api import _path, _int, _float, _arg
 
 FAMILY = "chart_composer_v2"
@@ -178,7 +178,7 @@ def _auxiliary_settings(payload, feature, choices, value_name, default, *, seque
     return requested, policy, value
 
 
-def _estimate_model(payload, mode, scope):
+def _estimate_model(payload, mode):
     """Resolve and count the proposed model on the meta device."""
     import torch
     from maichart.composer_v2.defaults import ENCODER_DEFAULTS
@@ -188,7 +188,7 @@ def _estimate_model(payload, mode, scope):
     from maichart.composer_v2.onset_policy import resolve_policy as resolve_onset
     from maichart.composer_v2.rhythm_structure import resolve_policy as resolve_structure
     from maichart.composer_v2.stream_codec import StreamCodec
-    from maichart.composer_v2.train import configure_trainable_parameters
+    from maichart.composer_v2.train import configure_trainable_parameters, resolve_training_policy
 
     saved = None
     if mode == "fresh":
@@ -206,11 +206,24 @@ def _estimate_model(payload, mode, scope):
         if not isinstance(saved, dict):
             raise ValueError("请先检查 Composer v2 checkpoint")
         config = ComposerV2Config.from_dict(saved)
-        if mode == "finetune":
-            config = replace(config, audio_layers=_integer(
-                payload, "audio_layers", config.audio_layers, minimum=config.audio_layers))
 
-    if mode in ('fresh', 'finetune'):
+    intent = config.intent_policy
+    scope = 'all'
+    backbone = {}
+    if mode != 'generate':
+        intent = intent_policy.resolve(_choice(payload, 'intent_policy', 'auto', intent_policy.CHOICES),
+                                      saved=saved, resume=mode == 'resume', sequence=config.sequence_policy)
+        contract = payload.get('training_contract')
+        scope = resolve_finetune_scope(_choice(payload, 'finetune_scope', 'auto', FINETUNE_SCOPE_CHOICES),
+            contract if isinstance(contract, dict) else {}, resume=mode == 'resume', initialized=mode == 'finetune',
+            intent_policy=intent, previous_intent=config.intent_policy)
+        backbone = intent_policy.fixed_backbone_options(payload, saved=saved, scope=scope, resume=mode == 'resume')
+    if backbone:
+        config = replace(config, intent_policy=intent)
+    elif mode in ('fresh', 'finetune'):
+        if mode == 'finetune':
+            config = replace(config, audio_layers=_integer(
+                payload, 'audio_layers', config.audio_layers, minimum=config.audio_layers))
         _, future_policy, future_weight = _auxiliary_settings(
             payload, "future_configuration", FUTURE_CONFIGURATION_CHOICES, "weight",
             FUTURE_CONFIGURATION_WEIGHT, sequence_policy=config.sequence_policy,
@@ -223,6 +236,8 @@ def _estimate_model(payload, mode, scope):
             structure_policy=resolve_structure(payload.get("rhythm_structure", "auto"), saved)[0],
             onset_readout_policy=resolve_onset(payload.get("onset_readout", "auto"), saved)[0],
             intensity_policy=resolve_intensity(payload.get("intensity_curve", "auto"), saved)[0],
+            intent_policy=intent,
+            condition_policy=resolve_training_policy(payload.get('condition_policy'), saved)[0],
             future_configuration_policy=future_policy,
             spatial_policy=spatial_policy.resolve(payload.get('spatial_policy','auto'), saved=saved,
                 resume=False, sequence=config.sequence_policy, writing=future_policy),
@@ -263,7 +278,7 @@ def _estimate_model(payload, mode, scope):
 def estimate_parameters(handler, payload):
     """Count Composer weights without loading training data, MERT or a checkpoint."""
     mode = _choice(payload, 'mode', 'fresh', ('fresh', 'resume', 'finetune'))
-    _, vocab_size, parameters, _ = _estimate_model(payload, mode, 'all')
+    _, vocab_size, parameters, _ = _estimate_model(payload, mode)
     return handler._json_response(dict(parameter_count=parameters, vocab_size=vocab_size))
 
 
@@ -274,9 +289,7 @@ def estimate_resources(handler, payload):
     mode = _choice(payload, 'mode', 'fresh', ('fresh', 'resume', 'finetune', 'generate'))
     contract = payload.get('training_contract') if mode == 'resume' else None
     contract = contract if isinstance(contract, dict) else {}
-    scope = resolve_finetune_scope(_choice(payload, 'finetune_scope', 'auto', FINETUNE_SCOPE_CHOICES),
-                                  contract, resume=mode == 'resume', initialized=mode == 'finetune')
-    config, vocab_size, parameters, trainable = _estimate_model(payload, mode, scope)
+    config, vocab_size, parameters, trainable = _estimate_model(payload, mode)
     if mode == 'generate':
         requested = dict(
             requested_device=_choice(payload, 'device', 'auto', ('auto', 'cpu', 'cuda')),
@@ -396,6 +409,17 @@ def start_train(handler,payload,*,runtime):
             if key in fixed and not (key=="audio_layers" and mode=="finetune" and payload.get(key) is not None):payload[key]=fixed[key]
         payload['refresh_events']=fixed.get('refresh_events',16)
     sequence_policy = 'continuous_events_v1' if mode == 'fresh' else fixed.get('sequence_policy', 'window_v1')
+    intent_requested = _choice(payload, 'intent_policy', 'auto', intent_policy.CHOICES)
+    intent = intent_policy.resolve(intent_requested, saved=fixed if parent else None,
+                                   resume=mode == 'resume', sequence=sequence_policy)
+    parent_contract = (checked.get('training_contract') or {}) if parent else {}
+    scope_requested = _choice(payload, 'finetune_scope', 'auto', FINETUNE_SCOPE_CHOICES)
+    scope = resolve_finetune_scope(scope_requested, parent_contract, resume=mode == 'resume',
+                                   initialized=mode == 'finetune', intent_policy=intent,
+                                   previous_intent=fixed.get('intent_policy', 'off') if parent else 'off')
+    backbone = intent_policy.fixed_backbone_options(payload, saved=fixed if parent else None,
+                                                   scope=scope, resume=mode == 'resume')
+    payload.update(backbone)
     musical_context = _choice(payload, 'musical_context', 'auto', MUSICAL_CONTEXT_CHOICES)
     probability_key = 'musical_context_probability'
     musical_probability = None
@@ -406,7 +430,6 @@ def start_train(handler,payload,*,runtime):
     musical_policy, musical_probability = resolve_musical_context(
         musical_context, musical_probability, sequence_policy=sequence_policy,
         parent_contract=checked.get('training_contract') if parent else None, resume=mode == 'resume')
-    parent_contract = (checked.get("training_contract") or {}) if parent else {}
     from maichart.composer_v2 import generated_prefix
     saved_prefix = parent_contract.get('generated_prefix_experiment', {}) if mode == 'resume' else {}
     prefix_mode = _choice(payload, 'generated_prefix_mode', saved_prefix.get('mode', 'off'), set(generated_prefix.MODES))
@@ -424,16 +447,17 @@ def start_train(handler,payload,*,runtime):
     relation_requested, relation_policy, relation_fraction = _auxiliary_settings(
         payload, "musical_relation", MUSICAL_RELATION_CHOICES, "fraction", MUSICAL_RELATION_FRACTION,
         sequence_policy=sequence_policy, saved_config=parent_contract, resume=mode == "resume")
-    future_requested, future_policy, future_weight = _auxiliary_settings(
-        payload, "future_configuration", FUTURE_CONFIGURATION_CHOICES, "weight",
-        FUTURE_CONFIGURATION_WEIGHT, sequence_policy=sequence_policy,
-        saved_config=fixed if parent else None, resume=mode == "resume")
-    scope_requested = _choice(payload, "finetune_scope", "auto", FINETUNE_SCOPE_CHOICES)
+    if backbone:
+        future_requested = future_policy = backbone['future_configuration_policy']
+        future_weight = backbone['future_configuration_weight']
+    else:
+        future_requested, future_policy, future_weight = _auxiliary_settings(
+            payload, "future_configuration", FUTURE_CONFIGURATION_CHOICES, "weight",
+            FUTURE_CONFIGURATION_WEIGHT, sequence_policy=sequence_policy,
+            saved_config=fixed if parent else None, resume=mode == "resume")
     spatial_requested = _choice(payload, 'spatial_policy', 'auto', spatial_policy.CHOICES)
     spatial = spatial_policy.resolve(spatial_requested, saved=fixed if parent else None,
                                      resume=mode=='resume', sequence=sequence_policy, writing=future_policy)
-    scope = resolve_finetune_scope(scope_requested, parent_contract, resume=mode == "resume",
-                                   initialized=mode == "finetune")
     if scope == "music_reading" and sequence_policy != "continuous_events_v1":
         raise ValueError("音乐读取连接微调需要连续事件 checkpoint")
     if mode == 'resume':
@@ -455,10 +479,12 @@ def start_train(handler,payload,*,runtime):
     _arg(args, "--future-configuration-policy", future_requested)
     _arg(args, "--future-configuration-weight", future_weight)
     _arg(args, "--spatial-policy", spatial)
+    if intent_requested != 'auto':
+        _arg(args, '--intent-policy', intent_requested)
     _arg(args, "--finetune-scope", scope_requested)
     settings.update(musical_relation_policy=relation_policy, musical_relation_fraction=relation_fraction,
                     future_configuration_policy=future_policy, future_configuration_weight=future_weight,
-                    spatial_policy=spatial, finetune_scope=scope)
+                    spatial_policy=spatial, finetune_scope=scope, intent_policy=intent)
     from maichart.composer_v2.difficulty import (
         DIFFICULTY_SLOTS, FITTED_SOURCES, LEGACY_DIFFICULTY_SLOTS, locate_scorer, resolve_selection, scorer_path_key,
     )
@@ -692,6 +718,10 @@ def start_generate(handler,payload,*,runtime):
     cache=_path(payload.get("cache_dir") or "cache/chart_composer_v2","cache_dir")
     settings=dict(checkpoint=str(checkpoint),audio=str(audio),output=str(output),cache_dir=str(cache))
     args=["-m","maichart.composer_v2.generate"]
+    intent_mode = _choice(payload, 'intent_mode', 'auto', ('auto', 'off'))
+    settings['intent_mode'] = intent_mode
+    if intent_mode != 'auto':
+        _arg(args, '--intent-mode', intent_mode)
     if condition: _arg(args, "--condition", json.dumps(condition, ensure_ascii=False))
     settings.update(condition=condition, condition_policy=policy, radar_style_guidance=guidance)
     if guidance:args.append('--radar-style-guidance')

@@ -39,7 +39,13 @@ class ComposerV2Config:
     future_configuration_policy: str = 'off'
     future_configuration_weight: float = .05
     spatial_policy: str = 'off'
+    intent_policy: str = 'off'
     def __post_init__(self):
+        from .intent_policy import POLICY as INTENT_POLICY
+        if self.intent_policy not in ('off', INTENT_POLICY):
+            raise ValueError('Unknown phrase intent policy')
+        if self.intent_policy != 'off' and self.sequence_policy != 'continuous_events_v1':
+            raise ValueError('Phrase intent requires continuous events')
         from . import spatial_policy
         if self.spatial_policy == 'auto':
             raise ValueError('Model configuration requires a resolved spatial policy')
@@ -416,6 +422,10 @@ class ComposerV2(nn.Module):
             code=torch.zeros(codec.vocab_size,dtype=torch.long)
             for value,name in ((1,'carry_id'),(2,'ctx_id'),(3,'ref_id'),(4,'tgt_id')):code[getattr(codec,name)]=value
             self.register_buffer('segment_code',code,persistent=False)
+        if c.intent_policy != 'off':
+            from .intent import PhraseIntent
+            with torch.random.fork_rng(devices=[]):
+                self.intent = PhraseIntent(codec, d)
     def token_weight(self):
         """Tied input/output table; phase tokens share subdivision-family structure."""
         device_type=self.embedding.weight.device.type
@@ -511,6 +521,15 @@ class ComposerV2(nn.Module):
             result['curve_rates'],result['curve_context']=self.intensity.plan(song,batch,training=self.training)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             result['onset_scores'] = self.onset_readout(batch)
+        if hasattr(self, 'intent') and batch.get('intent_mode', 'soft' if self.training else 'off') == 'soft':
+            strength = float(batch.get('intent_strength', 1.))
+            if not math.isfinite(strength) or not 0. <= strength <= 1.:
+                raise ValueError('Phrase intent strength must be finite and between 0 and 1')
+            if strength > 0.:
+                plan = batch.get('intent_plan')
+                if plan is None:
+                    plan = self.intent.plan(song, batch, strength=strength, training=self.training)
+                result['intent_plan'] = plan
         return result
     @staticmethod
     def reset_decode_cache(cache):cache.pop('decode_state',None)
@@ -624,17 +643,39 @@ class ComposerV2(nn.Module):
             role_values=torch.cat((probabilities[:,:,:3]*self.writing_time_tokens[value][...,None],
                                    probabilities[:,:,3:]*self.writing_query_tokens[value][...,None]),dim=-1)
             normalized=normalized+self.local_writing.execute_successor(role_values.to(normalized.dtype))
+        intent_plan = cache.get('intent_plan')
+        if batch.get('intent_mode') == 'off' or batch.get('intent_strength', 1.) == 0.:
+            intent_plan = None
+        if (intent_plan is not None and use_cache and value.device.type == 'cpu' and value.numel() == 1
+                and not self.intent.layout_inputs[value.item()]):
+            intent_plan = None
         if button_queries is not None:
             queried=normalized[button_queries]
             logits=F.linear(queried,weight.index_select(0,self.rim_button_ids),
                             self.output_bias.index_select(0,self.rim_button_ids))
             if rim_features is not None:
                 logits=logits+self.spatial_history.rim_bias(queried,rim_features[button_queries]).to(logits.dtype)
+            if intent_plan is not None and intent_plan.strength > 0.:
+                residual, strength = self.intent.residual(normalized, value, beats,
+                    weight.index_select(0, self.rim_button_ids), intent_plan)
+                adjusted = residual[button_queries].to(logits.dtype)
+                if adjusted.numel():
+                    intent_plan.record_execution(adjusted, strength[button_queries])
+                logits = logits + adjusted
             return logits
         logits=F.linear(normalized,weight,self.output_bias)
         if rim_features is not None:
             rim_bias=self.spatial_history.rim_bias(normalized,rim_features).to(logits.dtype)
             logits.index_add_(-1,self.rim_button_ids,rim_bias)
+        if intent_plan is not None and intent_plan.strength > 0.:
+            candidates = self.intent.component_ids
+            residual, strength = self.intent.residual(normalized, value, beats,
+                weight.index_select(0, candidates), intent_plan)
+            residual = residual.to(logits.dtype)
+            logits.index_add_(-1, candidates, residual)
+            intent_plan.record_execution(residual[:, -1], strength[:, -1])
+            if not use_cache:
+                cache['intent_execution'] = (strength.detach(), residual.detach().float().abs().mean(-1))
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             from .onset_readout import apply_phase_evidence
             logits = apply_phase_evidence(logits, cache['onset_scores'], batch['phase_queries_cpu'],
@@ -650,6 +691,8 @@ class ComposerV2(nn.Module):
         return logits
     def forward(self,batch,*,audio_cache=None):
         cache=self.encode_audio(batch) if audio_cache is None else audio_cache
+        if 'intent_plan' in cache:
+            cache.pop('intent_execution', None)
         if self.training and 'layout_replay' in batch:
             from .phrase_replay import replace_keys
             if 'condition' not in cache:
@@ -673,6 +716,14 @@ class ComposerV2(nn.Module):
             future['future_configuration_logits']=cache['writing_logits']
             if 'slide_geometry_logits' in cache:
                 future['slide_geometry_logits'] = cache['slide_geometry_logits']
+        if ('intent_plan' in cache and batch.get('intent_mode') != 'off'
+                and batch.get('intent_strength', 1.) != 0.):
+            execution = cache.get('intent_execution')
+            if execution is None:
+                zero = logits.new_zeros(logits.shape[:2], dtype=torch.float32)
+                execution = (zero, zero)
+            future['intent_execution'] = execution
+            future['intent_plan'] = cache['intent_plan']
         return {'logits':logits,**future,
                 **({'curve_rates':cache['curve_rates']} if 'curve_rates' in cache else {})}
     def loss(self,output,batch):
@@ -714,6 +765,16 @@ class ComposerV2(nn.Module):
             from . import slide_geometry, spatial_policy
             geometry_loss = slide_geometry.loss(output['slide_geometry_logits'], batch, mass)
             objective = objective + spatial_policy.GEOMETRY_LOSS_WEIGHT * geometry_loss
+        intent_metrics = {}
+        if 'intent_plan' in output:
+            from .intent import AUX_WEIGHT
+            intent_loss, intent_metrics = self.intent.auxiliary(output['intent_plan'], batch, weights.sum(1), mass)
+            objective = objective + AUX_WEIGHT * intent_loss
+            strength, shift = output['intent_execution']
+            intent_metrics['intent_execution_strength'] = (strength * weights).sum() / mass
+            intent_metrics['intent_gate_coverage'] = ((strength > 0.) * weights).sum() / mass
+            intent_metrics['intent_execution_coverage'] = ((shift > 0.) * weights).sum() / mass
+            intent_metrics['intent_logit_shift'] = (shift * weights).sum() / mass
         metrics=dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),
             future_configuration_loss=future_loss.detach(),time_loss=mean(timing).detach(),
             component_loss=mean(active&~timing).detach(),
@@ -722,4 +783,5 @@ class ComposerV2(nn.Module):
             metrics['layout_replay_changed']=output['layout_replay_changed']
         if geometry_loss is not None:
             metrics['slide_geometry_loss'] = geometry_loss.detach()
+        metrics.update({name: value.detach() for name, value in intent_metrics.items()})
         return objective,metrics

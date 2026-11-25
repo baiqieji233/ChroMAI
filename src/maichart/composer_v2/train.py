@@ -20,7 +20,7 @@ from .codec import ComponentCodec
 from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Dataset,
                    collate_composer_v2, LengthBucketBatchSampler)
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
-from . import chart_dialect, learning_rate, timing_recovery, spatial_policy
+from . import chart_dialect, intent_policy, learning_rate, timing_recovery, spatial_policy
 from .defaults import AUDIO_WRITING_POLICIES
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, FUTURE_CONFIGURATION_POLICY, configuration_view_fraction,
@@ -83,9 +83,11 @@ def parser():
     result.add_argument('--future-configuration-weight', type=float,
                         help=f'Weight of the ordered future chart objective (default {FUTURE_CONFIGURATION_WEIGHT})')
     result.add_argument('--finetune-scope', choices=FINETUNE_SCOPE_CHOICES, default='auto',
-                        help='Train all parameters or only music-reading parameters of an initialized checkpoint')
+                        help='Train all parameters, only music-reading parameters, or only the experimental intent module')
     result.add_argument('--spatial-policy', choices=spatial_policy.CHOICES, default='auto',
                         help='Auto inherits the checkpoint; opt in on a separate fine-tune or fresh run.')
+    result.add_argument('--intent-policy', choices=intent_policy.CHOICES, default='auto',
+                        help='编排构思实验。自动沿用原模型，新模型默认关闭。')
     result.add_argument('--sequence-policy',choices=('window_v1','continuous_events_v1'),default=None)
     result.add_argument('--refresh-events',type=int,default=16)
     result.add_argument('--training-window-events', type=int,
@@ -135,8 +137,9 @@ def configure_trainable_parameters(model, scope):
                            and (path[2] in ('local_attention', 'song_attention') or
                                 path[2] == 'norms' and path[3] in ('1', '2')))
         music_projection = path[0] in ('paired_music', 'entry_preview', 'future_configuration_head', 'local_writing',
-                                       'spatial_history')
-        trainable = scope == 'all' or decoder_reading or music_projection
+                                       'spatial_history', 'intent')
+        trainable = (path[0] == 'intent' if scope == 'intent_only'
+                     else scope == 'all' or decoder_reading or music_projection)
         parameter.requires_grad_(trainable)
         if trainable:
             trainable_names.append(name)
@@ -338,6 +341,8 @@ def _phase_budget(batch,phase_tokens):
 
 
 def _validate(model,loader,device,precision,maximum):
+    model.validation_intent_metrics = {}
+    has_intent = getattr(model.config, 'intent_policy', 'off') != 'off'
     model.validation_phase_loss=None
     model.validation_time_loss=None
     model.validation_nonphase_time_loss=None
@@ -356,6 +361,8 @@ def _validate(model,loader,device,precision,maximum):
     finite=torch.ones((),device=device,dtype=torch.bool)
     curve_numerator=torch.zeros((),device=device)
     future_configuration_numerator=torch.zeros((),device=device)
+    if has_intent:
+        intent_totals = torch.zeros(len(intent_policy.METRICS), device=device)
     geometry_numerator=0.
     geometry_rows=0
     spatial=None
@@ -376,6 +383,8 @@ def _validate(model,loader,device,precision,maximum):
             if not math.isfinite(mass) or mass<0:raise ValueError("Invalid validation token weight budget")
             queries=spatial.queries(batch,index) if spatial else None
             batch=_device_batch(batch,device)
+            if has_intent:
+                batch['intent_mode'] = 'soft'
             with _autocast(device,precision):
                 if queries is None:
                     output=model(batch)
@@ -388,6 +397,8 @@ def _validate(model,loader,device,precision,maximum):
             finite=finite&torch.isfinite(loss)
             numerator+=metrics['token_loss']*max(1.,mass);mass_sum+=mass
             curve_numerator+=metrics['curve_loss']*max(1.,mass)
+            if has_intent:
+                intent_totals += torch.stack([metrics[k].detach() for k in intent_policy.METRICS]) * mass
             if getattr(model.config,'future_configuration_policy','off') != 'off':
                 future_configuration_numerator+=metrics['future_configuration_loss']*max(1.,mass)
             if 'slide_geometry_loss' in metrics:
@@ -407,6 +418,9 @@ def _validate(model,loader,device,precision,maximum):
     if not bool(finite):raise RuntimeError("Nonfinite validation loss")
     if mass_sum<=0:raise ValueError("Validation has no positive quality-weighted target tokens")
     result=float(numerator)/max(1.,mass_sum)
+    if has_intent:
+        model.validation_intent_metrics = dict(zip(
+            ('validation_' + k for k in intent_policy.METRICS), (intent_totals / mass_sum).tolist()))
     model.validation_phase_loss=float(phase_numerator)/phase_mass_sum if phase_mass_sum else None
     model.validation_time_loss=float(time_numerator)/time_mass_sum if time_mass_sum else None
     nonphase_mass=time_mass_sum-phase_mass_sum
@@ -554,17 +568,29 @@ def train(args):
         getattr(args, 'musical_relation_policy', 'auto'), getattr(args, 'musical_relation_fraction', None),
         feature='musical_relation', choices=MUSICAL_RELATION_CHOICES, default=MUSICAL_RELATION_FRACTION,
         sequence_policy=args.sequence_policy, saved_config=parent_contract, resume=bool(args.resume))
-    args.future_configuration_policy, args.future_configuration_weight = resolve_auxiliary_policy(
-        getattr(args, 'future_configuration_policy', 'auto'), getattr(args, 'future_configuration_weight', None),
-        feature='future_configuration', choices=FUTURE_CONFIGURATION_CHOICES, default=FUTURE_CONFIGURATION_WEIGHT,
-        sequence_policy=args.sequence_policy, saved_config=parent_model, resume=bool(args.resume))
-    args.finetune_scope = resolve_finetune_scope(getattr(args, 'finetune_scope', 'auto'), parent_contract,
-                                                resume=bool(args.resume), initialized=bool(args.init_checkpoint))
+    args.intent_policy = intent_policy.resolve(getattr(args, 'intent_policy', 'auto'), saved=parent_model,
+                                              resume=bool(args.resume), sequence=args.sequence_policy)
+    previous_intent = parent_model.get('intent_policy', 'off')
+    args.finetune_scope = resolve_finetune_scope(
+        getattr(args, 'finetune_scope', 'auto'), parent_contract, resume=bool(args.resume),
+        initialized=bool(args.init_checkpoint), intent_policy=args.intent_policy, previous_intent=previous_intent)
+    backbone = intent_policy.fixed_backbone_options(vars(args), saved=parent_model,
+                                                   scope=args.finetune_scope, resume=bool(args.resume))
+    if backbone:
+        vars(args).update(backbone)
+    else:
+        args.future_configuration_policy, args.future_configuration_weight = resolve_auxiliary_policy(
+            getattr(args, 'future_configuration_policy', 'auto'), getattr(args, 'future_configuration_weight', None),
+            feature='future_configuration', choices=FUTURE_CONFIGURATION_CHOICES, default=FUTURE_CONFIGURATION_WEIGHT,
+            sequence_policy=args.sequence_policy, saved_config=parent_model, resume=bool(args.resume))
     args.spatial_policy = spatial_policy.resolve(
         getattr(args, 'spatial_policy', 'auto'), saved=parent_model, resume=bool(args.resume),
         sequence=args.sequence_policy, writing=args.future_configuration_policy)
     previous_spatial = parent_model.get('spatial_policy', 'off')
     spatial_migration = bool(parent and previous_spatial != args.spatial_policy)
+    intent_migration = bool(parent and args.intent_policy != previous_intent)
+    if intent_migration and (directory == source_directory or any(path.exists() for path in artifacts)):
+        raise ValueError('更改编排构思设置请在新目录微调，以保留原检查点')
     if args.finetune_scope == 'music_reading' and args.sequence_policy != 'continuous_events_v1':
         raise ValueError('Music-reading fine-tuning requires continuous event training')
     future_migration = bool(parent and args.future_configuration_policy !=
@@ -695,7 +721,7 @@ def train(args):
     audio_block_migration = bool(parent and args.local_audio_block_beats != inherited_audio_block)
     if audio_block_migration and (args.resume or directory == source_directory or any(p.exists() for p in artifacts)):
         raise ValueError('Changing local audio sharing requires init-checkpoint in a new directory')
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization","future_configuration_policy","future_configuration_weight","spatial_policy")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization","future_configuration_policy","future_configuration_weight","spatial_policy","intent_policy")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
@@ -707,6 +733,7 @@ def train(args):
     if audio_block_migration:
         comparable_config['local_audio_block_beats'] = inherited_audio_block
     if args.init_checkpoint:
+        comparable_config['intent_policy'] = previous_intent
         comparable_config['spatial_policy'] = previous_spatial
         comparable_config['future_configuration_policy'] = parent_config['future_configuration_policy']
         comparable_config['future_configuration_weight'] = parent_config['future_configuration_weight']
@@ -742,6 +769,8 @@ def train(args):
                        reference_quality_policy=reference_quality_policy)
         if args.spatial_policy != 'off':
             options['spatial_policy'] = args.spatial_policy
+        if args.intent_policy != 'off':
+            options['intent_policy'] = args.intent_policy
     train_options=dict(options)
     if args.sequence_policy=='continuous_events_v1':
         train_options.update(reference_augmentation=True, training_window_events=args.training_window_events,
@@ -767,6 +796,8 @@ def train(args):
         if prefix_bank is not None:
             generated_prefix.install(dataset, prefix_bank, args.generated_prefix_mode)
         vocabulary_changed = codec is not None and dataset.codec is not codec
+        if vocabulary_changed and dataset.codec.vocab_size != codec.vocab_size and args.finetune_scope == 'intent_only':
+            raise ValueError('当前素材新增了检查点未学习的词项。请选择全参数微调以学习新词项，或使用原词表覆盖的素材。')
         if vocabulary_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
             raise ValueError('Vocabulary expansion requires a new checkpoint directory; retain the parent')
         parent_vocab_size = codec.vocab_size if codec is not None else None
@@ -845,6 +876,8 @@ def train(args):
         contract['finetune_scope'] = args.finetune_scope
     if args.spatial_policy != 'off':
         contract['spatial_policy'] = args.spatial_policy
+    if args.intent_policy != 'off':
+        contract['intent_policy'] = args.intent_policy
     if reviewed_ref!='off':contract['reviewed_reference_policy']=reviewed_ref
     if args.sequence_policy=='continuous_events_v1' and (not args.resume or 'zero_unmarked_policy' in parent_contract):
         contract['zero_unmarked_policy']=zero_unmarked_policy
@@ -875,7 +908,7 @@ def train(args):
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
             parent_state = _extend_vocabulary_state(model, parent_state, parent_vocab_size)
-        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration or future_migration or spatial_migration:
+        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration or future_migration or spatial_migration or intent_migration:
             expected_missing = {'condition_missing.weight'} if migration else set()
             if music_migration:
                 expected_missing.update(k for k in model.state_dict() if k not in parent_state and
@@ -911,6 +944,11 @@ def train(args):
                 parent_state, spatial_missing = spatial_policy.migrate_parameters(
                     model, parent_state, previous_spatial, config.spatial_policy)
                 expected_missing.update(spatial_missing)
+            if intent_migration:
+                if args.intent_policy != 'off':
+                    expected_missing.update(k for k in model.state_dict() if k.startswith('intent.'))
+                else:
+                    parent_state = {k: v for k, v in parent_state.items() if not k.startswith('intent.')}
             loaded = model.load_state_dict(parent_state, strict=False)
             if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
                 raise ValueError('Unexpected state keys during explicit migration: ' + str(loaded))
@@ -919,6 +957,7 @@ def train(args):
                 onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,intensity_policy=args.intensity_policy,
                 music_context_policy=args.music_context_policy,audio_layers=config.audio_layers,song_layers=config.song_layers,
                 future_configuration_policy=args.future_configuration_policy,
+                **({'previous_intent_policy': previous_intent, 'intent_policy': args.intent_policy} if intent_migration else {}),
                 **({'previous_spatial_policy': previous_spatial, 'spatial_policy': config.spatial_policy}
                    if spatial_migration else {}),
                 zero_initialization=not future_migration or args.future_configuration_policy in ('off',*AUDIO_WRITING_POLICIES))
@@ -987,7 +1026,10 @@ def train(args):
     def checkpoint(improved=False):
         save_started = time.perf_counter()
         flush_epoch()
-        payload=dict(schema=SCHEMA,family=FAMILY,model_config=config.to_dict(),config=config.to_dict(),
+        saved_config = config.to_dict()
+        if args.intent_policy == 'off':
+            saved_config.pop('intent_policy', None)
+        payload=dict(schema=SCHEMA,family=FAMILY,model_config=saved_config,config=saved_config,
             codec=codec.to_dict(),model_state_dict=model.state_dict(),optimizer_state_dict=optimizer.state_dict(),
             scaler_state_dict=scaler.state_dict(),rng_state=rng_state(),training_state=dict(state),
             data_identity=identity,training_contract=contract,args=vars(args),best_basis=best_basis,
@@ -1021,6 +1063,7 @@ def train(args):
          musical_relation_fraction=args.musical_relation_fraction,
          future_configuration=dataset.audit.get('future_configuration'),
          future_configuration_policy=args.future_configuration_policy,
+         **({'intent_policy': args.intent_policy} if args.intent_policy != 'off' else {}),
          spatial_policy=args.spatial_policy,
          spatial_validation_enabled=bool(validation_loader is not None and args.spatial_policy != 'off'),
          future_configuration_weight=args.future_configuration_weight,
@@ -1036,6 +1079,10 @@ def train(args):
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
     input_tokens=0;input_slots=0
     has_geometry = args.spatial_policy != 'off'
+    has_intent = args.intent_policy != 'off'
+    if has_intent:
+        intent_running = torch.zeros(len(intent_policy.METRICS), device=device)
+        intent_group = torch.zeros_like(intent_running)
     running=torch.zeros(8+int(has_geometry),device=device);running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
     replay_keys=0
     gesture_pairs_seen=0
@@ -1079,6 +1126,8 @@ def train(args):
                 metrics['curve_loss']*budget,loss.detach()*budget,metrics['future_configuration_loss']*budget))
             if has_geometry and 'slide_geometry_loss' in metrics:
                 group_metrics[7] += metrics['slide_geometry_loss'] * budget
+            if has_intent:
+                intent_group += torch.stack([metrics[k].detach() for k in intent_policy.METRICS]) * mass
             group_mass+=mass if cpu_valid else 0.
             group_time_mass+=time_mass if cpu_valid else 0.
             group_component_mass+=component_mass if cpu_valid else 0.
@@ -1102,11 +1151,15 @@ def train(args):
                     running[:7]+=group_metrics[:7];running_mass+=group_mass
                     if has_geometry:
                         running[8] += group_metrics[7]
+                    if has_intent:
+                        intent_running += intent_group
                     running_relation_mass+=group_relation_mass
                     running_time_mass+=group_time_mass;running_component_mass+=group_component_mass;running_phase_mass+=group_phase_mass
                 else:emit("progress",stage="nonfinite_update_skipped",epoch=epoch,batch=batch_index+1,optimizer_steps=state["optimizer_steps"])
                 scaler.update();optimizer.zero_grad(set_to_none=True)
                 group_metrics.zero_();group_finite.fill_(True)
+                if has_intent:
+                    intent_group.zero_()
                 group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;group_relation_mass=0.
                 state.update(epoch=epoch,batch_cursor=batch_index+1,update_attempts=attempt+1)
             ended=time.perf_counter();compute_sec+=ended-now
@@ -1126,6 +1179,7 @@ def train(args):
                     loss_scope="run_quality_weighted_token_mean",
                     curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
                     future_configuration_loss=values[6]/max(1.,running_mass),
+                    **(dict(zip(intent_policy.METRICS, (intent_running / max(1.,running_mass)).tolist())) if has_intent else {}),
                     **({'slide_geometry_loss':values[8]/max(1.,running_mass)} if has_geometry else {}),
                     layout_replay_keys=replay_keys,layout_replay_changed=int(values[7]),
                     gesture_pairs_seen=gesture_pairs_seen,
@@ -1159,6 +1213,7 @@ def train(args):
                          validation_phase_loss=model.validation_phase_loss,
                          validation_curve_loss=model.validation_curve_loss,
                          validation_future_configuration_loss=model.validation_future_configuration_loss,
+                         **getattr(model,'validation_intent_metrics',{}),
                          **({'validation_slide_geometry_loss': model.validation_slide_geometry_loss,
                              'spatial_effect': model.validation_spatial_effect} if has_geometry else {}),
                          validation_coverage=validation_coverage,improved=improved,
@@ -1192,6 +1247,7 @@ def train(args):
                 validation_curve_loss=getattr(model,'validation_curve_loss',None),
                 validation_curve_mae=getattr(model,'validation_curve_mae',None),
                 validation_future_configuration_loss=getattr(model,'validation_future_configuration_loss',None),
+                **getattr(model,'validation_intent_metrics',{}),
                 **({'validation_slide_geometry_loss': model.validation_slide_geometry_loss,
                     'spatial_effect': model.validation_spatial_effect} if has_geometry else {}),
                 validation_coverage=validation_coverage,

@@ -59,7 +59,7 @@
       "ticks_per_beat", "max_tokens", "window_beats", "history_beats", "future_beats", "audio_backend");
     if (mode === "finetune") keys.push("audio_layers");
     if (mode !== "resume") keys.push("local_audio_block_beats", "music_context", "rhythm_structure", "onset_readout",
-      "intensity_curve", "future_configuration_policy", "future_configuration_weight", "spatial_policy");
+      "intensity_curve", "future_configuration_policy", "future_configuration_weight", "spatial_policy", "intent_policy");
     return {mode, ...Object.fromEntries(keys.filter((key) => Object.hasOwn(settings, key)).map((key) => [key, settings[key]]))};
   }
 
@@ -147,7 +147,7 @@
       if (!inspected?.valid || !inspected.vocab_size) return waitForInput("检查 checkpoint 后显示显存、模型大小和参数量");
       payload.model_config = inspected.model_config;
       payload.vocab_size = inspected.vocab_size;
-      if (mode === "resume") payload.training_contract = inspected.training_contract;
+      payload.training_contract = inspected.training_contract;
     }
     const key = JSON.stringify(payload);
     if (previous?.key === key) return;
@@ -329,6 +329,7 @@
       mode==='resume' ? '音乐与写法联动、局部写法及微调范围均继承 checkpoint。'
         : `音乐与写法联动：${nameOf('v2TrainMusicalRelationPolicy')}${value('v2TrainMusicalRelationPolicy')==='off'?'':` · 强化上限 ${value('v2TrainMusicalRelationFraction')}`}；局部写法学习：${nameOf('v2TrainFutureConfigurationPolicy')}${value('v2TrainFutureConfigurationPolicy')==='off'?'':` · 学习权重 ${value('v2TrainFutureConfigurationWeight')}`}`,
       ...(mode==='finetune' ? [`微调范围：${nameOf('v2TrainFinetuneScope')}`] : []),
+      ...(value('v2TrainIntentPolicy')==='phrase_intent_v1' ? ['编排构思学习 · 启用（实验）'] : []),
       `前文纠错训练 · ${nameOf('v2TrainTimingRecovery')}`,
       `总目标 ${value("v2TrainEpochs")} 轮 · 批大小 ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")}（单步等效 ${Number(value("v2TrainBatchSize"))*Number(value("v2TrainGradAccumulation"))}） · 精度 ${nameOf("v2TrainPrecision")}`,
       `显存优化：${nameOf("v2TrainActivationCheckpointing")} · CUDA 预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "自动"} · 音频内存缓存 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,
@@ -378,6 +379,7 @@
       `模型：${value("checkpointPath").trim()||"尚未选择 checkpoint"}`,
       `目标等级 ${value("level")} · 生成 ${value("v2GenerateCount","1")} 张完整谱面${Number(value("v2GenerateCount","1"))>1?`（并行 ${Math.min(Number(value("v2GenerateCount","1")),Number(value("v2GenerateParallel","1")))}）`:""} · 种子 ${value("seed").trim()||"自动"}`,
       v2GenerationSearchSummary(),
+      ...(value('v2GenerateIntentMode')==='off' && !document.getElementById('v2GenerateIntentMode')?.disabled ? ['编排构思 · 已关闭'] : []),
       `防无理保护：${checked("v2GenerateInterceptTapOnSlide")?`防撞尾（${value("v2GenerateTapOnSlideThresholdMs")}ms）`:"不拦撞尾"}${checked("v2GenerateInterceptSlideHeadTap")?" ＋ 防星头抢拍":""} · Touch：${nameOf("v2GenerateTouchReachabilityPolicy")}`,
       `采音温度 ${value("v2GenerateTemperature")}${document.getElementById('v2GenerateOnsetStrength')?.disabled?'':`（重音贴合 ${value("v2GenerateOnsetStrength","1")}）`} · 配置温度 ${document.getElementById('v2GenerateActionTemperature')?.disabled?"跟随采音":value("v2GenerateActionTemperature")||"跟随采音"} · 冲突恢复 ${value("v2GenerateRollbackWindows")} 次`,
       `Radar / Style：${typeof v2ConditionCapability==='function' && v2ConditionCapability().enabled ? `手动指定 ${Object.values(v2ConditionState).filter(item=>item.override).length} 项；其余自动由音乐决定` : '由音乐与等级自动决定'}`,

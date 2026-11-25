@@ -50,6 +50,9 @@ class Bank:
 class View:
     song: object
     known: list[EventPoint]
+    intent_cursor: Fraction | None = None
+    intent_cutoff: Fraction | None = None
+    intent_blocked: frozenset[Fraction] = frozenset()
 
 
 def read_bank(path):
@@ -128,15 +131,37 @@ def _views(dataset, song, sample):
         trial, reason = _check_window(guard, [*prefix, *suffix])
         if trial is None:
             raise ValueError(f'真人后续未通过连续可行性检查（{reason}）')
-    return begin, last+1, View(song, pts[:begin]), View(replace(song, sustain=sampled_state), altered)
+    intent_cursor = max(lead[-1].beat, sample.prefix[-1].beat)
+    intent_blocked = set()
+    if getattr(dataset, 'intent_policy', 'off') != 'off':
+        # Both paired views use the same earlier authored supports. A carry
+        # visible in either arm therefore excludes its source in both arms.
+        for state, cursor in ((real_state, lead[-1].beat), (sampled_state, sample.prefix[-1].beat)):
+            for cutoff in (cursor, max(Fraction(0), cursor - dataset.history_beats)):
+                second = song.clock.at(cutoff)
+                intent_blocked.update(Fraction(marker['source_beat']) for marker in state._candidate_markers(second)
+                    if marker['source_beat'] <= cursor and float(marker['end_second']) > second)
+        intent_cutoff = min(sample.start, lead[-1].beat - dataset.history_beats,
+                            sample.prefix[-1].beat - dataset.history_beats)
+        view_options = dict(intent_cursor=intent_cursor, intent_cutoff=intent_cutoff,
+                            intent_blocked=frozenset(intent_blocked))
+    else:
+        view_options = {}
+    return (begin, last+1, View(song, pts[:begin], **view_options),
+            View(replace(song, sustain=sampled_state), altered, **view_options))
 
 
-def item(dataset, view, song_id, begin, end):
+def item(dataset, view, song_id, begin, end, *, prepare_intent=True):
     original = dataset.songs[song_id]
     out = dataset.build_stream(view.song, view.known, view.known[-1].beat,
                                target=original.points[begin:end], training=True, reference_start=None)
     out['curve_teacher_allowed'] = False
     dataset._writing_targets(out, dataset._configuration(song_id), original, begin, end)
+    if prepare_intent and getattr(dataset, 'intent_policy', 'off') != 'off':
+        from .intent_data import add_item
+        out['_intent_blocked'] = view.intent_blocked, ()
+        add_item(out, dataset, song_id, original, begin, end,
+                 query_cursor=view.intent_cursor, support_before=view.intent_cutoff)
     return out
 
 
@@ -153,8 +178,8 @@ def install(dataset, bank, mode):
             if si is None:
                 raise ValueError('训练清单没有通过当前筛选且同时匹配音频和谱面的记录')
             begin, end, authored, sampled = _views(dataset, dataset.songs[si], sample)
-            left = item(dataset, authored, si, begin, end)
-            right = item(dataset, sampled, si, begin, end)
+            left = item(dataset, authored, si, begin, end, prepare_intent=False)
+            right = item(dataset, sampled, si, begin, end, prepare_intent=False)
             a, b = left['labels'] != -100, right['labels'] != -100
             if (not left['labels'][a].equal(right['labels'][b])
                     or not left['token_weights'][a].equal(right['token_weights'][b])
