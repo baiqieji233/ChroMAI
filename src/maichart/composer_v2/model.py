@@ -540,7 +540,8 @@ class ComposerV2(nn.Module):
             keep[:,0]=True;known=known&keep
         values=values*known
         return self.condition(values)+self.condition_missing((~known).float())
-    def decode(self,batch,cache,*,incremental=True,return_future_hidden=False,decision_positions=None,button_queries=None):
+    def decode(self,batch,cache,*,incremental=True,return_future_hidden=False,decision_positions=None,button_queries=None,
+               use_spatial_history=True):
         ids=batch['input_ids'];length=ids.size(1)
         use_cache=incremental and not self.training and not torch.is_grad_enabled()
         state=cache.get('decode_state') if use_cache else None
@@ -587,7 +588,7 @@ class ComposerV2(nn.Module):
         if hasattr(self,'intensity'):
             x=x+self.intensity(cache['curve_context'],batch,start=start)
         rim_features=None
-        if hasattr(self, 'spatial_history'):
+        if use_spatial_history and hasattr(self, 'spatial_history'):
             spatial_state=state.setdefault('spatial', {}) if use_cache else None
             spatial_frame=self.spatial_history.scan(value,beats,batch['token_mask'][:,start:],
                                                     start=start,state=spatial_state)
@@ -647,8 +648,8 @@ class ComposerV2(nn.Module):
             rows=batch['future_configuration_positions']
             return logits,normalized[rows[:,0],rows[:,1]-start]
         return logits
-    def forward(self,batch):
-        cache=self.encode_audio(batch)
+    def forward(self,batch,*,audio_cache=None):
+        cache=self.encode_audio(batch) if audio_cache is None else audio_cache
         if self.training and 'layout_replay' in batch:
             from .phrase_replay import replace_keys
             if 'condition' not in cache:

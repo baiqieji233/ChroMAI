@@ -956,6 +956,12 @@ function composerV2TrainingView(task) {
   const addValidation=row=>{if(trainingMetricNumber(row,'optimizer_steps')!==null)validationChecks.set(Number(row.optimizer_steps),row);};
   if(Array.isArray(result.composer_v2_validation_history))result.composer_v2_validation_history.forEach(addValidation);
   const timingSamples=[],saveSamples=[];
+  const slideSteps=new Map();
+  const addSlideStep=row=>{
+    const step=trainingMetricNumber(row,'optimizer_steps'),loss=trainingMetricNumber(row,'slide_geometry_loss');
+    if(step!==null && loss!==null)slideSteps.set(step,loss);
+  };
+  (result.composer_v2_slide_loss_history||[]).forEach(addSlideStep);
   const epochs=new Map();
   const addEpoch=row=>{if(trainingMetricNumber(row,'epoch')!==null)epochs.set(Number(row.epoch),row);};
   if(Array.isArray(result.composer_v2_epoch_history))result.composer_v2_epoch_history.forEach(addEpoch);
@@ -974,11 +980,12 @@ function composerV2TrainingView(task) {
     if(row.stage==='epoch_start')epochStart=row;
     if(row.stage==='validation')validation=row;
     if(row.stage==='checkpoint_validation'){addValidation(row);if(!checkpointValidation||Number(row.optimizer_steps)>=Number(checkpointValidation.optimizer_steps||0))checkpointValidation=row;}
-    if(row.stage==='training')timingSamples.push(row);
+    if(row.stage==='training'){timingSamples.push(row);addSlideStep(row);}
     if(row.stage==='training' && (!metrics || Number(row.optimizer_steps)>=Number(metrics.optimizer_steps||0)))metrics=row;
     if(row.stage==='epoch_complete'){addEpoch(row);if(!complete || Number(row.epoch)>=Number(complete.epoch))complete=row;}
   }
   if(complete)addEpoch(complete);
+  addSlideStep(metrics);
   if(checkpointValidation)addValidation(checkpointValidation);
   const validationHistory=[...validationChecks.values()].sort((a,b)=>Number(a.optimizer_steps)-Number(b.optimizer_steps));
   const history=[...epochs.values()].sort((a,b)=>Number(a.epoch)-Number(b.epoch));
@@ -1134,11 +1141,37 @@ function composerV2TrainingView(task) {
     const rows=[
       ['训练写法 loss',show(n(metrics,'future_configuration_loss'))],
       ['验证写法 loss',show(n(complete,'validation_future_configuration_loss'))]];
-    if(['slide_geometry_v1','disk_geometry_v1'].includes(runtime.spatial_policy ?? config.spatial_policy)) {
-      rows.push(['Slide 轨迹训练 loss',show(n(metrics,'slide_geometry_loss'))],
-                ['Slide 轨迹验证 loss',show(n(complete,'validation_slide_geometry_loss'))]);
-    }
     cards.push(['局部写法学习',rows]);
+  }
+  const spatial=runtime.spatial_policy ?? config.spatial_policy ?? settings.spatial_policy;
+  const checks=new Map();
+  for(const row of [...validationHistory,...history]){
+    const step=n(row,'optimizer_steps');
+    if(step!==null && (row.spatial_effect || n(row,'validation_slide_geometry_loss')!==null))checks.set(step,row);
+  }
+  const spatialChecks=[...checks].sort((a,b)=>a[0]-b[0]);
+  if(['slide_geometry_v1','disk_geometry_v1'].includes(spatial) || slideSteps.size){
+    const [step,last]=spatialChecks.at(-1)||[];
+    const effect=last?.spatial_effect;
+    const rows=[['Slide 轨迹训练 loss（累计）',show(n(metrics,'slide_geometry_loss'))],
+                ['Slide 轨迹验证 loss',show(n(last,'validation_slide_geometry_loss'))]];
+    if(step!=null)rows.push(['最近验证',`第 ${step} 步`]);
+    if(effect?.slide){
+      const {bce,constant_bce,rows:count}=effect.slide;
+      rows.push([`轨迹预测误差 · ${count} 个监督区间`,`模型 ${show(bce)} ／ 固定均值 ${show(constant_bce)}（越低越好）`]);
+    }
+    if(effect?.history){
+      const h=effect.history;
+      rows.push(['启用前文走势后改变首选外键',h.count?`${h.changed} / ${h.count} 次（${(100*h.changed/h.count).toFixed(1)}%）`:'抽查批次没有可比较的外键']);
+      if(h.mean_tv!=null)rows.push(['八键概率分布平均变化',`${(100*h.mean_tv).toFixed(2)}%`]);
+      if(h.count)rows.push(['与原谱对照',`${h.gained} 次改中，${h.lost} 次改错`]);
+      if(h.example)rows.push(['一处选键变化（关 → 开）',`${h.example.off} → ${h.example.on}，原谱 ${h.example.authored}`]);
+    }else if(spatial==='disk_geometry_v1'){
+      rows.push(['前文走势对照',runtime.validation_windows===0?'本次训练没有验证集':
+        runtime.spatial_validation_enabled?'等待验证抽查':'本次训练未记录对照；新版训练会在验证时抽查']);
+    }
+    if(effect && !effect.slide)rows.push(['轨迹预测误差','这次验证没有可用的 Slide 轨迹']);
+    cards.splice(1,0,['盘面走势学习效果',rows]);
   }
   if (runtime.timing_recovery?.policy==='gesture_pairs_v1' && metrics?.gesture_pairs_seen!=null) {
     cards.push(['同曲配置走势对照',[['本次配对练习次数',metrics.gesture_pairs_seen]]]);
@@ -1155,6 +1188,7 @@ function composerV2TrainingView(task) {
       ['与原谱不同',metrics.layout_replay_changed]]]);
   }
   return {status,progress:amount,knownTarget:target>0,indeterminate:preparing,cards,history,validationHistory,
+    slideSteps:[...slideSteps].sort((a,b)=>a[0]-b[0]).slice(-40),spatialChecks:spatialChecks.slice(-8),
     note:'累计训练 loss 可能掩盖近期退步，请同时查看固定片段验证与非相位时序 loss。当前版本在定期保存检查点时也会验证；预算为0时检查完整开发集，正数使用固定抽查片段。'};
 }
 
@@ -1170,6 +1204,39 @@ function renderComposerV2TrainingMetrics(task,panel,source,groups) {
     const list=document.createElement('dl');list.className='training-metric-list';
     for(const [label,value] of rows){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=value;list.append(dt,dd);}
     card.append(heading,list);groups.appendChild(card);
+    if(title==='盘面走势学习效果' && view.slideSteps.length>=2){
+      const points=view.slideSteps, first=points[0],last=points.at(-1);
+      const ys=points.map(p=>p[1]),low=Math.min(...ys),high=Math.max(...ys);
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+      svg.setAttribute('viewBox','0 0 240 44');svg.setAttribute('class','training-metric-sparkline');
+      svg.setAttribute('role','img');svg.setAttribute('aria-label','近期记录的累计 Slide 轨迹训练 loss');
+      const line=document.createElementNS(svg.namespaceURI,'polyline');
+      line.setAttribute('points',points.map(([x,y])=>`${2+236*(x-first[0])/(last[0]-first[0])},${high===low?22:41-38*(y-low)/(high-low)}`).join(' '));
+      line.setAttribute('fill','none');line.setAttribute('stroke','currentColor');line.setAttribute('stroke-width','2');
+      svg.appendChild(line);
+      const caption=document.createElement('small');
+      caption.textContent=`第 ${first[0]}–${last[0]} 步 · 累计轨迹 loss ${first[1].toFixed(4)} → ${last[1].toFixed(4)}`;
+      card.append(svg,caption);
+    }
+    if(title==='盘面走势学习效果' && view.spatialChecks.length>1){
+      const details=document.createElement('details'),summary=document.createElement('summary');
+      summary.textContent='最近验证对照';details.appendChild(summary);
+      const table=document.createElement('table');table.className='v2-epoch-table';
+      const header=table.createTHead().insertRow();
+      for(const label of ['步数','轨迹误差 / 固定均值','首选变化','改中 / 改错']){
+        const cell=document.createElement('th');cell.textContent=label;header.appendChild(cell);
+      }
+      const body=table.createTBody();
+      for(const [step,record] of view.spatialChecks){
+        const s=record.spatial_effect?.slide,h=record.spatial_effect?.history;
+        const row=body.insertRow();
+        for(const value of [step,s?`${s.bce.toFixed(3)} / ${s.constant_bce.toFixed(3)}`:'—',
+                            h?.count?`${h.changed} / ${h.count}`:'—',h?.count?`${h.gained} / ${h.lost}`:'—']){
+          row.insertCell().textContent=value;
+        }
+      }
+      details.appendChild(table);card.appendChild(details);
+    }
   }
   if(view.history.length) {
     const card=document.createElement('section');card.className='training-metric-trends';

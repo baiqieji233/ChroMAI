@@ -2182,6 +2182,10 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
             elif stage == "training":
                 data.setdefault("loss_scope", "run_quality_weighted_token_mean")
                 task.result["composer_v2_training_metrics"] = dict(data)
+                if data.get('slide_geometry_loss') is not None:
+                    points = task.result.setdefault('composer_v2_slide_loss_history', [])
+                    points.append({k: data.get(k) for k in ('optimizer_steps', 'slide_geometry_loss')})
+                    del points[:-40]
                 task.result["epoch"] = epoch
                 task.result["progress_indeterminate"] = False
                 batch, total = data.get("batch"), data.get("total")

@@ -345,6 +345,7 @@ def _validate(model,loader,device,precision,maximum):
     model.validation_curve_mae=None
     model.validation_future_configuration_loss=None
     model.validation_slide_geometry_loss=None
+    model.validation_spatial_effect=None
     model.validation_coverage=getattr(loader,'validation_coverage',None)
     if loader is None:return None
     phase_numerator=torch.zeros((),device=device);phase_mass_sum=0.
@@ -357,6 +358,10 @@ def _validate(model,loader,device,precision,maximum):
     future_configuration_numerator=torch.zeros((),device=device)
     geometry_numerator=0.
     geometry_rows=0
+    spatial=None
+    if getattr(model.config,'spatial_policy','off') != 'off':
+        from .spatial_metrics import SpatialValidation
+        spatial=SpatialValidation(model,min(len(loader),maximum) if maximum else len(loader))
     curve_error=torch.zeros(2,device=device);curve_exposure=torch.zeros(2,device=device)
     with torch.inference_mode():
         for index,batch in _batches(loader):
@@ -369,17 +374,26 @@ def _validate(model,loader,device,precision,maximum):
             _,mass,time_mass,_,_=_cpu_budget(batch,time_tokens)
             phase_mass=_phase_budget(batch,phase_tokens)
             if not math.isfinite(mass) or mass<0:raise ValueError("Invalid validation token weight budget")
+            queries=spatial.queries(batch,index) if spatial else None
             batch=_device_batch(batch,device)
             with _autocast(device,precision):
-                output=model(batch);loss,metrics=model.loss(output,batch)
+                if queries is None:
+                    output=model(batch)
+                else:
+                    cache=model.encode_audio(batch)
+                    spatial.compare(model,batch,cache,queries)
+                    output=model(batch,audio_cache=cache)
+                    del cache
+                loss,metrics=model.loss(output,batch)
             finite=finite&torch.isfinite(loss)
             numerator+=metrics['token_loss']*max(1.,mass);mass_sum+=mass
             curve_numerator+=metrics['curve_loss']*max(1.,mass)
-            if model.config.future_configuration_policy != 'off':
+            if getattr(model.config,'future_configuration_policy','off') != 'off':
                 future_configuration_numerator+=metrics['future_configuration_loss']*max(1.,mass)
             if 'slide_geometry_loss' in metrics:
                 geometry_numerator+=metrics['slide_geometry_loss']*max(1.,mass)
                 geometry_rows+=batch['slide_geometry_positions'].numel()
+                spatial.geometry(batch)
             if hasattr(model,'intensity'):
                 widths=batch['curve_widths'].float()
                 # Rate MAE is independent of token CE and measured in real units.
@@ -398,10 +412,12 @@ def _validate(model,loader,device,precision,maximum):
     nonphase_mass=time_mass_sum-phase_mass_sum
     model.validation_nonphase_time_loss=(float(time_numerator-phase_numerator)/nonphase_mass
                                         if nonphase_mass>0 else None)
-    if model.config.future_configuration_policy != 'off' and model.config.future_configuration_weight > 0:
+    if getattr(model.config,'future_configuration_policy','off') != 'off' and model.config.future_configuration_weight > 0:
         model.validation_future_configuration_loss=float(future_configuration_numerator)/max(1.,mass_sum)
     if geometry_rows:
         model.validation_slide_geometry_loss=float(geometry_numerator)/mass_sum
+    if spatial:
+        model.validation_spatial_effect=spatial.report(geometry_numerator,geometry_rows)
     if hasattr(model,'intensity'):
         model.validation_curve_loss=float(curve_numerator)/max(1.,mass_sum)
         values=(curve_error/curve_exposure.clamp_min(1e-6)).cpu().tolist()
@@ -1006,6 +1022,7 @@ def train(args):
          future_configuration=dataset.audit.get('future_configuration'),
          future_configuration_policy=args.future_configuration_policy,
          spatial_policy=args.spatial_policy,
+         spatial_validation_enabled=bool(validation_loader is not None and args.spatial_policy != 'off'),
          future_configuration_weight=args.future_configuration_weight,
          future_configuration_train_view_fraction=configuration_view_fraction(args.future_configuration_policy),
          training_window_events=args.training_window_events,
@@ -1142,7 +1159,8 @@ def train(args):
                          validation_phase_loss=model.validation_phase_loss,
                          validation_curve_loss=model.validation_curve_loss,
                          validation_future_configuration_loss=model.validation_future_configuration_loss,
-                         **({'validation_slide_geometry_loss': model.validation_slide_geometry_loss} if has_geometry else {}),
+                         **({'validation_slide_geometry_loss': model.validation_slide_geometry_loss,
+                             'spatial_effect': model.validation_spatial_effect} if has_geometry else {}),
                          validation_coverage=validation_coverage,improved=improved,
                          validation_sec=time.perf_counter()-validation_started,loss_scope='fixed_holdout')
                 checkpoint(improved)
@@ -1174,7 +1192,8 @@ def train(args):
                 validation_curve_loss=getattr(model,'validation_curve_loss',None),
                 validation_curve_mae=getattr(model,'validation_curve_mae',None),
                 validation_future_configuration_loss=getattr(model,'validation_future_configuration_loss',None),
-                **({'validation_slide_geometry_loss': model.validation_slide_geometry_loss} if has_geometry else {}),
+                **({'validation_slide_geometry_loss': model.validation_slide_geometry_loss,
+                    'spatial_effect': model.validation_spatial_effect} if has_geometry else {}),
                 validation_coverage=validation_coverage,
                  validation_sec=validation_sec,
                 loss_scope="epoch_validation" if validation_loss is not None else "epoch_training",
