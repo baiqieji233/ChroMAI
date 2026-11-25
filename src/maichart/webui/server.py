@@ -2705,7 +2705,7 @@ def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
                     if chart.get('log'):paths.append(Path(chart['log']))
                     if chart.get('candidate_audit'):paths.append(Path(chart['candidate_audit']))
                     if chart.get('status') == 'completed':
-                        paths.extend(Path(chart[key]) for key in ('output', 'report') if chart.get(key))
+                        paths.extend(Path(chart[key]) for key in ('output', 'package_audio', 'report') if chart.get(key))
                     elif chart.get('diagnostic'):
                         paths.append(Path(chart['diagnostic']))
             except (OSError, ValueError, TypeError) as exc:

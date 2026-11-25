@@ -65,6 +65,9 @@ def _generate_one(item,index,**overrides):
         entry=dict(index=index,seed=item.seed,output=item.output,status='completed',
             report=str(output.with_suffix('.composer_v2.json')),events=metadata.get('events'),
             sha256=_digest(output),accepted_with_conflicts_count=metadata.get('accepted_with_conflicts_count',0))
+        if getattr(item, 'song_package', False):
+            from .song_package import track_path
+            entry['package_audio'] = str(track_path(item.audio, output.parent))
         audit=metadata.get('candidate_probability_audit') or {}
         if audit.get('path'):entry['candidate_audit']=audit['path']
     except Exception as exc:

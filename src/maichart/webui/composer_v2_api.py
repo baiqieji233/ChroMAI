@@ -691,7 +691,7 @@ def start_generate(handler,payload,*,runtime):
     output=_path(payload.get("output") or "outputs/composer_v2/maidata.txt","output")
     cache=_path(payload.get("cache_dir") or "cache/chart_composer_v2","cache_dir")
     settings=dict(checkpoint=str(checkpoint),audio=str(audio),output=str(output),cache_dir=str(cache))
-    args=["-m","maichart.composer_v2.generate"]
+    args=["-m","maichart.composer_v2.generate","--song-package"]
     if condition: _arg(args, "--condition", json.dumps(condition, ensure_ascii=False))
     settings.update(condition=condition, condition_policy=policy, radar_style_guidance=guidance)
     if guidance:args.append('--radar-style-guidance')
@@ -888,10 +888,12 @@ def start_generate(handler,payload,*,runtime):
     import uuid
     directory_tag = '_batch_' if count > 1 else '_'
     root = output.parent / (output.stem + directory_tag + uuid.uuid4().hex[:12])
-    output = root / output.name
+    from maichart.composer_v2.song_package import track_path
+    output = root / 'maidata.txt'
+    packaged_audio = track_path(audio, root)
     args[args.index('--output')+1] = str(output)
     settings['output'] = str(output)
-    paths = [output, output.with_suffix('.composer_v2.json')]
+    paths = [output, packaged_audio, output.with_suffix('.composer_v2.json')]
     if record_probabilities:
         paths.append(output.with_suffix('.candidate_audit.jsonl'))
     if count>1:
