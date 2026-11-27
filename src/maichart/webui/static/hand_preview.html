@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ChroMAI · 手顺预览</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/hand_preview.css">
+<script defer src="/hand_overlay_motion.js"></script><script defer src="/hand_overlay.js"></script>
+<script defer src="/hand_note_colors.js"></script><script type="module" src="/hand_preview.js"></script></head>
+<body><main><header><h1>手顺预览</h1><span id="runtimeStatus" role="status"></span><button id="install" hidden>安装 MiaView 播放器</button></header>
+<section class="picker" aria-label="选择谱面">
+<div class="row"><button id="pickFolder">选择谱面文件夹</button><button id="pickFiles">选择谱面文件</button>
+<input type="file" id="folder" webkitdirectory multiple hidden><input type="file" id="files" accept=".txt,.maidata" multiple hidden>
+<span id="fileCount">可选择单曲或包含多首歌的文件夹</span></div>
+<div class="row" id="selection" hidden><label id="searchWrap" hidden>筛选 <input id="search" type="search" placeholder="曲名或文件夹名"></label><label>谱面 <select id="chart"></select></label><label>难度 <select id="slot"></select></label>
+<label>配乐 <select id="audio"></select></label><button id="pickAudio">另选配乐</button><input type="file" accept="audio/*,.ogg,.flac,.m4a" id="audioFile" hidden>
+<button id="calculate" class="primary" disabled>计算并预览</button></div>
+<div id="progress" role="status" aria-live="polite" hidden></div></section>
+<section id="stage" hidden aria-label="原谱播放">
+<header><h2 id="title"></h2><span id="details"></span></header>
+<div class="board"><nav><strong>原谱 · MiaView Web</strong><label><select id="style" aria-label="手顺方案"><option value="continuous">人体模拟 · 连扫优先</option><option value="relay">人体模拟 · 分段换手</option></select></label>
+<button id="compare">切换方案</button><select id="mode" aria-label="显示方式"><option value="labels">手顺标注</option><option value="notes">方案着色</option><option value="paths">手部轨迹</option><option value="original">原色</option></select>
+<span id="legend"><b>左手</b> · <b>右手</b></span><label id="futureWrap" hidden><input type="checkbox" id="future" checked>提前显示走向</label></nav>
+<div id="mount"></div><p id="labelStatus" hidden></p><p id="diff" hidden></p></div>
+<nav id="transport"><button id="play">播放</button><input id="bar" aria-label="播放位置" type="range" min="0" max="1" step=".001" value="0"><output id="clock">0:00.000</output>
+<select id="speed" aria-label="播放速度"><option value=".25">0.25×</option><option value=".5">0.5×</option><option value="1" selected>1×</option></select>
+<button id="prev">上一帧</button><button id="next">下一帧</button><button id="start">从头</button><button id="full">全屏</button></nav></section>
+</main></body></html>

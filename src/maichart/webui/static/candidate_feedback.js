@@ -969,7 +969,13 @@ function candidateSavedReviews(records) {
     const result=$('candidatePoolBudgetResult');result.replaceChildren();
     const hint=document.createElement('p');hint.textContent='以下是所选来源的估算学习份额，分别计算采音和配置；百分比不是谱面质量评分，也不是实际训练损失占比。';result.append(hint);
     const share=value=>{const percent=100*Number(value||0);return percent>0&&percent<.1?'<0.1%':percent.toFixed(1)+'%';};
-    for(const source of data.sources||[]) {const row=document.createElement('p');const name=datasetWorkspaceState.items.find(item=>item.manifest===source.manifest)?.name||source.manifest;row.textContent=`${name}${source.candidate_pool&&!name.includes('候选库')?'（候选库）':''}：采音 ${share(source.timing_share)} ／ 配置 ${share(source.layout_share)}`;result.append(row);}
+    for(const source of data.sources||[]) {
+      const row=document.createElement('p');
+      const name=datasetWorkspaceState.items.find(item=>item.manifest===source.manifest)?.name||source.manifest;
+      const role=source.mechanics_charts?` · ${source.mechanics_charts} 张设为仅练动作`:'';
+      row.textContent=`${name}${source.candidate_pool&&!name.includes('候选库')?'（候选库）':''}：采音 ${share(source.timing_share)} ／ 配置 ${share(source.layout_share)}${role}`;
+      result.append(row);
+    }
     if(!(data.sources||[]).length){const empty=document.createElement('p');empty.textContent='当前没有可计入的学习内容，请先确认候选片段或检查所选来源。';result.append(empty);}
     if(data.warnings?.length){const warning=document.createElement('details'),title=document.createElement('summary');title.textContent=`${data.warnings.length} 项未计入，查看原因`;warning.append(title);for(const item of data.warnings.slice(0,30)){const row=document.createElement('p'),empty=String(item.reason||'').match(/No inote for difficulty (\d+) found/);row.textContent=`${item.source_path||item.manifest||'来源'}：${empty?`难度槽位 ${empty[1]} 为空，未计入估算`:item.reason||'请检查源资料'}`;warning.append(row);}if(data.warnings.length>30){const more=document.createElement('p');more.textContent='其余记录见右侧任务结果中的 result.json。';warning.append(more);}result.append(warning);}
   }
@@ -994,7 +1000,8 @@ function candidateSavedReviews(records) {
     if(!manifests.length){result.textContent='请先勾选要估算的训练来源。';return;}
     budgetPending=true;controls();result.textContent='正在提交估算；接下来会显示阶段和进度，可以继续浏览和审阅素材。';
     try {
-      const response=await api('/api/candidates/budget',{manifests});
+      const mechanics=typeof mechanicsTrainingSources==='function'?mechanicsTrainingSources(manifests,true):[];
+      const response=await api('/api/candidates/budget',{manifests,...(mechanics.length?{mechanics_manifests:mechanics}:{})});
       if(response.task_id){budgetTaskId=response.task_id;budgetProgress(response);watchTask(response.task_id,finishBudget,budgetProgress);}
       else finishBudget({status:'completed',result:response});
     } catch(error){finishBudget({status:'failed',error:error.message||String(error)});}

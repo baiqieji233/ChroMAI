@@ -237,6 +237,10 @@ def describe(task_id, *, project, log_root, task=None):
             audio_url=audio_url,audio_name=audio_path.name if audio_url else None, audio_path=str(audio_path) if audio_path else None,
             audio_sha256=audio_hash,audio_duration_sec=audio_duration,difficulty_index=index,
             timeline_url='/api/preview/timeline?id='+quote(str(task_id))+'&version='+version_id))
+        hand_report = (Path(saved['hand_report']) if saved and saved.get('hand_report')
+                       else path.with_suffix('.composer_v2.json'))
+        if not repaired and hand_report.is_file():
+            charts[-1]['generation_report_url'] = _resource(hand_report)
     if not charts:raise FileNotFoundError('本任务没有可预览的谱面文件，或原文件已被覆盖')
     if archive is None and not batch_labels:
         def original_path(chart):
@@ -285,6 +289,9 @@ def archive_generation(record, *, project, log_root, prior=None):
     for chart in charts:
         path=Path(chart['path'])
         paths.setdefault(path,chart['label'])
+        if chart.get('generation_report_url'):
+            report_file = resource_path(chart['generation_report_url'].split('id=',1)[1])
+            paths.setdefault(report_file,report_file.name)
     start=datetime.strptime(record['started'],'%Y-%m-%d %H:%M:%S').timestamp()
     root=Path(log_root).parent/'generation_results'
     root.mkdir(parents=True,exist_ok=True)
@@ -312,6 +319,10 @@ def archive_generation(record, *, project, log_root, prior=None):
         stage.rename(dest)
     selected=[dict(path=str(saved[Path(c['path'])]), label=c['label'], file_sha256=c['file_sha256'])
               for c in charts if Path(c['path']) in saved]
+    by_archived = {str(archived):original for original,archived in saved.items()}
+    for row in selected:
+        report_file = saved.get(by_archived[row['path']].with_suffix('.composer_v2.json'))
+        if report_file is not None:row['hand_report'] = str(report_file)
     if conflict is not None:
         report['conflict_report']=str(saved[conflict]) if conflict in saved else None
     result.update(
@@ -350,6 +361,55 @@ def historical_task(task_id, *, project, log_root):
         pass
     return dict(task_id=task_id,kind=record['kind'],status='completed',progress=1,
                 message='历史生成任务',logs=logs,result=result)
+
+
+def hand_phrase_view(query):
+    """Use only the existing, stamp-bound preview resources for this review."""
+    import math
+    from maichart.composer_v2.hand_flow import build_motion_stream, recognize_hands
+    from maichart.composer_v2.hand_review_html import render_view, source_layer
+    from maichart.event_timing import parse_event_chart
+    from maichart.tempo_clock import TempoClock
+    token = query.get('chart', [''])[0]
+    path = resource_path(token)
+    start, stop = (float(query.get(k, ['nan'])[0]) for k in ('start','end'))
+    if not (math.isfinite(start) and math.isfinite(stop) and 0 <= start < stop <= start+60.001):
+        raise ValueError('请在时间轴上选择最长 60 秒的乐句')
+    slot = int(query.get('slot',['5'])[0])
+    if path.suffix.lower() not in {'.txt','.maidata'} or slot not in range(1,8):
+        raise ValueError('请选择有效的谱面和难度')
+    chart = parse_event_chart(path,slot,preserve_each_groups=True)
+    if not chart.points:raise ValueError('这个难度没有音符')
+    clock = TempoClock(chart.tempo_changes,chart.audio_first)
+    stream = build_motion_stream(chart.points,chart.tempo_changes,clock)
+    observed_end=max(stop,clock.at(chart.end_beat))
+    result = recognize_hands(chart.points,chart.tempo_changes,clock,start,stop,observed_end,
+                             motion_stream=stream)
+    result['source_layer'] = source_layer(chart,clock,start,stop)
+    result['slot'] = slot
+    report_token=query.get('report',[''])[0]
+    if report_token:
+        try:
+            report_path=resource_path(report_token)
+            if report_path.name.endswith('.composer_v2.json'):
+                with report_path.open(encoding='utf-8') as handle:
+                    payload=json.load(handle)
+                recorded=payload.get('hand_predictions',{}) if isinstance(payload,dict) else {}
+                if isinstance(recorded,dict) and recorded.get('chart_file_sha256')==hashlib.sha256(path.read_bytes()).hexdigest():
+                    result['model_events']=[e for e in recorded.get('events',[]) if isinstance(e,dict)
+                        and isinstance(e.get('second'),(int,float)) and start<=e['second']<=stop
+                        and isinstance(e.get('prediction',{}).get('contacts'),list)]
+        except (OSError,ValueError):
+            pass  # The independent chart analysis is still available.
+    audio_url = None
+    audio_token = query.get('audio',[''])[0]
+    if audio_token:
+        audio = resource_path(audio_token)
+        if audio.suffix.lower() not in ('.mp3','.ogg','.flac','.wav','.m4a','.aac','.opus'):
+            raise ValueError('当前音乐格式不支持试听')
+        audio_url = _resource(audio)
+    resource_path(token)
+    return render_view(result,title=chart.title or path.stem,start=start,stop=stop,audio_url=audio_url,chart_url=_resource(path))
 
 
 def describe_timeline(task_id, version_id, *, project, log_root, task=None):

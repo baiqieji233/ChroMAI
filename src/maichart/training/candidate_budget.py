@@ -6,10 +6,10 @@ import os
 from pathlib import Path
 import time
 
-POLICY = 'source_supervision_budget_v3'
+POLICY = 'source_supervision_budget_v4'
 
 
-def fingerprint(manifests):
+def fingerprint(manifests, mechanics_manifests=()):
     from .dataset_catalog import _absolutize_song_paths
     inputs = {}
     for value in manifests:
@@ -39,14 +39,15 @@ def fingerprint(manifests):
             try:
                 stat=path.stat();inputs[key]=(stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
             except OSError:inputs[key]=None
-    raw=json.dumps(dict(policy=POLICY,manifests=manifests,inputs=inputs),sort_keys=True).encode()
+    raw=json.dumps(dict(policy=POLICY,manifests=manifests,inputs=inputs,
+                        mechanics_manifests=sorted(str(Path(p).resolve()) for p in mechanics_manifests)),sort_keys=True).encode()
     return hashlib.sha256(raw).hexdigest()
 
 
-def estimate(manifests, cache_dir, progress=None):
+def estimate(manifests, cache_dir, progress=None, *, mechanics_manifests=()):
     from .dataset_catalog import _write_json
     if progress:progress(dict(stage='checking',completed=0,total=0,source=''))
-    key=fingerprint(manifests)
+    key=fingerprint(manifests,mechanics_manifests)
     path=Path(cache_dir)/(key+'.json')
     if path.is_file():
         result=json.loads(path.read_text(encoding='utf-8'))
@@ -54,8 +55,9 @@ def estimate(manifests, cache_dir, progress=None):
         return result
     started=time.monotonic()
     from .candidate_pool import supervision_budget
-    result=supervision_budget(manifests,progress=progress)
-    if fingerprint(manifests)!=key:
+    options={'mechanics_manifests':mechanics_manifests} if mechanics_manifests else {}
+    result=supervision_budget(manifests,progress=progress,**options)
+    if fingerprint(manifests,mechanics_manifests)!=key:
         raise ValueError('资料或标注在估算期间发生变化，请重新估算')
     result.update(cache_hit=False,policy=POLICY,input_fingerprint=key,elapsed_sec=time.monotonic()-started)
     _write_json(path,result)
@@ -67,14 +69,15 @@ def main(argv=None):
     parser.add_argument('--request',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--cache-dir',required=True)
     args=parser.parse_args(argv)
-    values=json.loads(Path(args.request).read_text(encoding='utf-8'))['manifests']
+    request=json.loads(Path(args.request).read_text(encoding='utf-8'))
+    values=request['manifests']
     last=[float('-inf')]
     def emit(value):
         now=time.monotonic()
         if now-last[0]<.5 and value.get('completed')!=value.get('total'):return
         last[0]=now
         print('candidate_budget '+json.dumps(value,ensure_ascii=False),flush=True)
-    result=estimate(values,args.cache_dir,emit)
+    result=estimate(values,args.cache_dir,emit,mechanics_manifests=request.get('mechanics_manifests',()))
     from .dataset_catalog import _write_json
     _write_json(Path(args.output),result)
     emit(dict(stage='complete',completed=1,total=1,source='',cache_hit=result.get('cache_hit',False)))

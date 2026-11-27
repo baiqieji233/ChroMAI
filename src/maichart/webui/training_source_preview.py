@@ -125,6 +125,8 @@ def _describe_included_chart(chart, record, supervision, fitted_score=None):
     )
     if fitted_score is not None:
         row["fitted_level"] = round(float(fitted_score), 2)
+    if chart.metadata.get("learning_role") == "mechanics":
+        row.update(learning_role="mechanics", effective_weight=0., weight_summary="仅练动作 · 应用本谱的标注范围")
     return row
 
 
@@ -168,6 +170,8 @@ def _charts(manifest, payload, resolve_asset):
             except (TypeError, ValueError):
                 continue
             level = difficulty.get("level_raw", difficulty.get("level"))
+            if "learning_role" in song and "learning_role" not in difficulty:
+                difficulty = dict(difficulty, learning_role=song["learning_role"])
             yield Chart(owner, name or default_name, str(song.get("title") or path.parent.name),
                         str(level or ""), slot, path, audio, candidate, reviewed_only, difficulty)
 
@@ -520,6 +524,8 @@ def _quality_rows(manifest, data, sources, options, digest, composition, *, read
         suppliers = []
         unknown = False
         for other, supervision in matches:
+            if other.metadata.get('learning_role') == 'mechanics':
+                continue  # An action-only example cannot restore note/timing supervision.
             other_key = str(other.path), other.slot
             contributions = contributors.get(other_key, ())
             if not effective and len(contributions) > 1:
@@ -590,13 +596,15 @@ def _quality_rows(manifest, data, sources, options, digest, composition, *, read
     ))
     total_weight_sum = 0.0
     for item in included:
-        w = float(item["effective_weight"])
+        mechanics = item.get("learning_role") == "mechanics"
+        w = 0. if mechanics else float(item["effective_weight"])
         tier = item["weight_tier"]
         src_name = item["source"]
         by_slot[str(item["slot"])] += 1
         by_tier[tier] += 1
         total_weight_sum += w
         st = source_stats[src_name]
+        st["mechanics_charts"] = st.get("mechanics_charts",0) + int(mechanics)
         st["included_charts"] += 1
         st["weight_sum"] += w
         if tier == "boosted":
@@ -621,6 +629,7 @@ def _quality_rows(manifest, data, sources, options, digest, composition, *, read
             source=src_name,
             included_charts=inc,
             weight_sum=w_sum,
+            mechanics_charts=st.get("mechanics_charts",0),
             weight_share=round(st["weight_sum"] / total_weight_sum, 4) if total_weight_sum > 0 else 0.0,
             avg_weight=round(st["weight_sum"] / inc, 3) if inc > 0 else 0.0,
             boosted_charts=st["boosted_charts"],

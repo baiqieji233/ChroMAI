@@ -45,7 +45,7 @@ class RawMaidataChart:
     raw: str | None = None
 
 
-def parse_maidata_metadata(text: str) -> RawMaidataChart:
+def parse_maidata_metadata(text: str, *, difficulty_range: range = DIFFICULTY_RANGE) -> RawMaidataChart:
     """Parse top-level Maidata metadata and raw ``inote_x`` blocks.
 
     The parser recognizes ``&key=value`` lines and treats ``&inote_1=`` through
@@ -68,7 +68,7 @@ def parse_maidata_metadata(text: str) -> RawMaidataChart:
         key = match.group("key")
         value_start = match.end()
 
-        if _is_inote_key(key):
+        if _is_inote_key(key, difficulty_range):
             value_parts = [line[value_start:]]
             index += 1
             while index < len(lines) and FIELD_RE.match(lines[index]) is None:
@@ -82,8 +82,8 @@ def parse_maidata_metadata(text: str) -> RawMaidataChart:
         fields[key] = value
         raw_fields[key] = f"&{key}={value}"
 
-    levels = _indexed_fields(fields, "lv")
-    designers = _indexed_fields(fields, "des")
+    levels = _indexed_fields(fields, "lv", difficulty_range)
+    designers = _indexed_fields(fields, "des", difficulty_range)
     difficulties = [
         RawDifficultyBlock(
             index=difficulty_index,
@@ -94,7 +94,7 @@ def parse_maidata_metadata(text: str) -> RawMaidataChart:
             raw_designer=raw_fields.get(f"des_{difficulty_index}"),
             raw_inote=raw_fields.get(f"inote_{difficulty_index}"),
         )
-        for difficulty_index in DIFFICULTY_RANGE
+        for difficulty_index in difficulty_range
         if (
             difficulty_index in levels
             or difficulty_index in designers
@@ -186,14 +186,14 @@ def resolve_chart_first(chart: RawMaidataChart, difficulty_index: int) -> str | 
     return None
 
 
-def _is_inote_key(key: str) -> bool:
+def _is_inote_key(key: str, difficulty_range: range = DIFFICULTY_RANGE) -> bool:
     match = re.fullmatch(r"inote_(\d+)", key)
-    return match is not None and int(match.group(1)) in DIFFICULTY_RANGE
+    return match is not None and int(match.group(1)) in difficulty_range
 
 
-def _indexed_fields(fields: dict[str, str], prefix: str) -> dict[int, str]:
+def _indexed_fields(fields: dict[str, str], prefix: str, difficulty_range: range = DIFFICULTY_RANGE) -> dict[int, str]:
     indexed: dict[int, str] = {}
-    for difficulty_index in DIFFICULTY_RANGE:
+    for difficulty_index in difficulty_range:
         key = f"{prefix}_{difficulty_index}"
         if key in fields:
             indexed[difficulty_index] = fields[key]

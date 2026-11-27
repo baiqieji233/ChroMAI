@@ -156,6 +156,11 @@ def item(dataset, view, song_id, begin, end, *, prepare_intent=True):
     out = dataset.build_stream(view.song, view.known, view.known[-1].beat,
                                target=original.points[begin:end], training=True, reference_start=None)
     out['curve_teacher_allowed'] = False
+    if getattr(dataset,'hand_plan_policy','off')!='off':
+        from .hand_plan import add_item
+        # The substituted history can assign different hands before this seam.
+        # Only observable forward targets are shared across the two paired views.
+        add_item(out,dataset,original,dataset._configuration(song_id),begin,end,authored_history=False)
     dataset._writing_targets(out, dataset._configuration(song_id), original, begin, end)
     if prepare_intent and getattr(dataset, 'intent_policy', 'off') != 'off':
         from .intent_data import add_item

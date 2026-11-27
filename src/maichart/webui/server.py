@@ -311,6 +311,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_phrase_rank_policy": True,
                                               "composer_v2_motion_writing": True,
                                               "composer_v2_spatial_policy": True,
+                                              "composer_v2_hand_plan": True,
+                                              "composer_v2_hand_memory": True,
                                               "composer_v2_phrase_intent": True,
                                               "composer_v2_radar_style_guidance": True,
                                               "composer_v2_eos_suppression": True,
@@ -769,6 +771,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 task_id=query.get('id',[''])[0]
                 return self._json_response(chart_preview.describe_timeline(task_id,query.get('version',[''])[0],
                     project=PROJECT_ROOT,log_root=LOG_ROOT,task=_get_task(task_id)))
+            if parsed.path=='/api/preview/hands':
+                body=chart_preview.hand_phrase_view(query).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type','text/html; charset=utf-8')
+                self.send_header('Cache-Control','no-store')
+                self.send_header('Content-Length',str(len(body)))
+                self.end_headers()
+                if not head:self.wfile.write(body)
+                return
             if parsed.path=='/api/preview/resource':
                 path=chart_preview.resource_path(query.get('id',[''])[0])
                 return chart_preview.serve_file(self,path,head=head)
@@ -2879,6 +2890,13 @@ def _prepare_training_sources(payload: dict[str, Any], *, preview_root: Path | N
     manifests = payload.get("manifests")
     auto_quality_manifests = payload.get("auto_quality_manifests")
     prepare_options = {}
+    roles = payload.get("mechanics_manifests")
+    if roles:
+        if not isinstance(roles, list) or any(not isinstance(p, str) or not p.strip() for p in roles):
+            raise ValueError("仅练动作的来源必须是训练清单路径列表")
+        if not manifests or payload.get("auto_preprocess"):
+            raise ValueError("请先勾选本次联合训练的来源")
+        prepare_options["mechanics_manifests"] = [str(_resolve_path(p)) for p in roles]
     if auto_quality_manifests is not None:
         if _requested_model_family(payload) != COMPOSER_V2_MODEL_FAMILY:
             raise ValueError("按来源采用自动体检仅适用于 Composer v2")

@@ -309,23 +309,33 @@ class DatasetAPI:
                 raise ValueError("采用自动体检的来源必须是训练清单路径数组")
             auto_quality_manifests = [str(self._resolve(value)) for value in auto_quality_manifests]
         family = payload.get("model_family")
+        roles = payload.get("mechanics_manifests")
+        if roles is not None:
+            if (not isinstance(roles, list)
+                    or any(not isinstance(p, str) or not p.strip() for p in roles)):
+                raise ValueError("仅练动作的来源必须是训练清单路径列表")
+            if roles and family != "chart_composer_v2":
+                raise ValueError("按来源练动作仅适用于 Composer v2")
+            roles = [str(self._resolve(p)) for p in roles]
         # song_form_v1 consumes the same event-preprocessed source contract;
         # composition must validate it as event audio, never as legacy frames.
-        if family in {"song_form_v1", "chart_stream_v1", "chart_composer_v1", "chart_composer_v2"}:
+        if family in {"song_form_v1", "chart_stream_v1", "chart_composer_v1", "chart_composer_v2"} and not roles:
             family = "event_v1"
         published = self.workspace_root / "composed_manifests"
         if preview_root is None:
             result = compose_datasets(manifests, published, family,
-                                      auto_quality_manifests=auto_quality_manifests)
+                                      auto_quality_manifests=auto_quality_manifests, mechanics_manifests=roles)
         else:
             result = compose_datasets(manifests, preview_root, family, published_root=published,
                                       preview_audio_digest=preview_audio_digest,
-                                      auto_quality_manifests=auto_quality_manifests)
+                                      auto_quality_manifests=auto_quality_manifests, mechanics_manifests=roles)
         return HTTPStatus.OK, result
 
     def prepare(self, manifests: list[str], model_family: str = "event_v1", *, preview_root: Path | None = None,
-                preview_audio_digest=None, auto_quality_manifests=None) -> dict[str, Any]:
+                preview_audio_digest=None, auto_quality_manifests=None, mechanics_manifests=None) -> dict[str, Any]:
         payload = {"manifests": manifests, "model_family": model_family}
+        if mechanics_manifests:
+            payload["mechanics_manifests"] = mechanics_manifests
         if auto_quality_manifests is not None:
             payload["auto_quality_manifests"] = auto_quality_manifests
         if preview_root is None:

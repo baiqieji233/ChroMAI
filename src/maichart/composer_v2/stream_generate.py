@@ -3,6 +3,7 @@ from fractions import Fraction
 from collections import ChainMap
 from copy import copy, deepcopy
 from pathlib import Path
+import hashlib
 import json
 import math
 import numpy as np
@@ -18,6 +19,37 @@ from maichart.composer.event_set_codec import _atoms
 
 
 class RefreshContext(ValueError):pass
+
+
+class _PlannedTokens(list):
+    """Keep a sampled group's pre-layout readout with that specific proposal."""
+    hand_probabilities = None
+
+
+def _committed_readouts(points,records,make_sampler):
+    result=[]
+    for index,point in enumerate(points):
+        entry=records.get(point.beat)
+        previous=points[index-1] if index else None
+        if entry is None or entry[0] is not point or entry[1]!=point.note_text or entry[2] is not previous:
+            break
+        result.append((*entry[3],'committed'))
+    # An edit can change every subsequent hand. Replay both the pre-note
+    # forecast and the actual post-note readout in bounded causal batches.
+    while len(result)<len(points):
+        start=len(result)
+        replay=make_sampler(points[:start])
+        tokens=[]; ends=[]
+        for point in points[start:start+replay.dataset.refresh_events]:
+            group=replay.codec.encode_points([point])
+            if ends and (len(replay.prefix)+len(tokens)+len(group)>replay.max_tokens or
+                         replay.dataset._evidence_v2() and point.beat>=replay.reference_refresh_beat):
+                break
+            tokens.extend(group)
+            ends.append(len(replay.prefix)+len(tokens)-1)
+        replay._logits(tokens)
+        result.extend((*replay._read_committed_hands(i),'final_prefix_replay') for i in ends)
+    return result
 
 
 class RecoveryBudget:
@@ -105,6 +137,8 @@ class EventSampler(WindowSampler):
         self.batch['onset_strength'] = effective_strength(getattr(args,'onset_strength',None),
             getattr(model.config,'onset_readout_policy','off'))
         self.batch['intensity_strength']=getattr(args,'intensity_strength',1.)
+        if hasattr(model,'hand_memory'):
+            self.batch['use_hand_feedback']=not getattr(args,'no_hand_memory_feedback',False)
         if intent_options is not None:
             self.batch.update(intent_options)
         self.max_tokens=model.config.max_tokens;self.cache=model.encode_audio(self.batch)
@@ -142,6 +176,10 @@ class EventSampler(WindowSampler):
         self._decoded_ids=();self._query_ids=()
         self._clock_states=[];self._clocks=[]
         self._tiles=[];self._local_tiles=[];self._token_buffers=None
+        if hasattr(self.model,'hand_memory'):
+            from .hand_timeline import Timeline
+            self._hand_timeline=Timeline(self.codec,self.song.clock)
+            self._hand_buffer=None
 
     def _without_reference(self,ref_end):
         # Keep exactly the history/carry that survived the original token budget.
@@ -185,6 +223,8 @@ class EventSampler(WindowSampler):
             boundary = min(changed)
             self.model.rewind_decode_cache(self.cache, boundary + 1)
             self._decoded_ids = self._decoded_ids[:boundary]
+            if hasattr(self,'_hand_timeline'):
+                del self._hand_timeline.states[boundary:]
             self._layout_mask = None
         self._masked_layout = positions
         self._layout_key = history
@@ -270,6 +310,13 @@ class EventSampler(WindowSampler):
         else:
             self._retry_cache_dirty=True
             self.retry_stats['decoder_cache_hits']=self.retry_stats.get('decoder_cache_hits',0)+1
+        if (action and getattr(self, '_capture_hand', False) and target[-1] in self.codec.phases):
+            # A retry tree stores logits only. Rebuild this one query if its
+            # matching decoder state is absent, without consuming another draw.
+            if not cache_miss:
+                self._rewind(target)
+                self._logits(target)
+            self._current_hand_plan = self._read_hand_plan()
         if action:
             generator,temperature,top_p=self.action_generator,self.action_temperature,self.action_top_p
         else:
@@ -377,6 +424,18 @@ class EventSampler(WindowSampler):
             'token_mask':token_mask[:,:len(ids)],'tile_ids_cpu':[self._tiles],'local_tile_ids_cpu':[local_tiles]}
         state=self.cache.get('decode_state') if not self.model.training and not torch.is_grad_enabled() else None
         start=int(state['length']) if state and state['length']<len(ids) else 0
+        if hasattr(self,'_hand_timeline'):
+            retained_hand=min(retained,len(self._hand_timeline.states))
+            if self._hand_buffer is None or self._hand_buffer.size(1)<len(ids):
+                from .hand_timeline import WIDTH
+                self._hand_buffer=torch.empty((1,max(self.max_tokens,len(ids)),WIDTH),dtype=torch.int32,device=self.device)
+                retained_hand=0
+            mask=self._masked_layout if layout_history is not None else frozenset()
+            new_rows=self._hand_timeline.extend(ids,retained_hand,mask)
+            if len(new_rows):
+                self._hand_buffer[0,retained_hand:len(ids)]=torch.from_numpy(new_rows).to(self.device)
+            query['hand_timeline']=self._hand_buffer[:,start:len(ids)]
+            query['hand_timeline_start']=start
         if getattr(self.dataset,'intensity_policy','off')!='off':
             from .intensity import query_indices
             query.update({k:v[None].to(self.device) for k,v in query_indices(self.song,clocks[start:]).items()})
@@ -408,6 +467,23 @@ class EventSampler(WindowSampler):
         logits=self.model.decode(query,self.cache)[0]
         self._decoded_ids=ids
         return logits if all_new else logits[-1]
+
+    def _read_hand_plan(self):
+        state = self.cache['decode_state']
+        return state['hand']['plan'][0, state['length']-1].detach().float().clone().add_(.5)
+
+    def _read_committed_hands(self,index):
+        from . import hand_timeline as tl
+        state=self.cache['decode_state']
+        snap=self._hand_timeline.states[index]
+        facts=dict(holds=snap.row[tl.N_HOLD],pending_slides=snap.row[tl.WAIT],active_slides=snap.row[tl.TRACE],
+                   sustains=[dict(pad=tl.PADS[pad-1] if pad else None,end_second=end,
+                                  trace_second=None if pad else trace) for pad,trace,end,_,_ in snap.active])
+        for name,col in (('previous_second',tl.PREVIOUS),('return_second',tl.RETURN)):
+            if snap.row[col]:
+                facts[name]=self._hand_timeline.states[snap.row[col]-1].second
+        return (state['hand']['plan'][0,index].detach().float().clone().add_(.5),
+                state['hand_memory']['logits'][0,index].detach().float().clone(),snap.row,facts)
 
     def _append_single_beat_tiles(self, missing):
         tiles = [self.dataset.tile(self.song, anchor) for anchor in missing]
@@ -457,6 +533,8 @@ class EventSampler(WindowSampler):
         if list(ids[:offset])!=self._retry_base[-offset:]:return False
         return self._fixed_retry_tree.reject(ids[offset:])
     def propose(self,target,after,end,fixed=None):
+        self._capture_hand = hasattr(getattr(self, 'model', None), 'hand_plan')
+        self._current_hand_plan = None
         if getattr(self,'record_probabilities',False):
             from .probability_audit import EventProbability
             self._probability=EventProbability()
@@ -498,7 +576,8 @@ class EventSampler(WindowSampler):
         split=time.index(self.codec.phase_id)
         event_beat=fixed.beat if fixed is not None else (
             Fraction(int(''.join(self.codec.digits[i] for i in time[1:split])))+self.codec.phases[time[-1]])
-        out=list(time);used=set();atom=[];count=0;completed_atoms=[]
+        out=_PlannedTokens(time) if self._capture_hand else list(time)
+        used=set();atom=[];count=0;completed_atoms=[]
         while True:
             rejected_closures=[]
             if not atom:
@@ -510,6 +589,7 @@ class EventSampler(WindowSampler):
                         self._probability.record(logits,self.codec.event_end_id,
                             (*self.codec.kind_ids,self.codec.event_end_id),role='configuration',forced=True)
                     self._finish_probability()
+                    if self._capture_hand:out.hand_probabilities=self._current_hand_plan
                     out.append(self.codec.event_end_id);return out
                 uncond_free=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count else ())
                 uncond_allowed=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count and wanted is None else ())
@@ -547,7 +627,10 @@ class EventSampler(WindowSampler):
                 body=''.join(self.codec.tokens[t][2:] for t in atom if self.codec.tokens[t].startswith('V:'))
                 raise GridDurationRejected(event_beat,body,completed_atoms=completed_atoms,
                                            pulse=_duration_head_pulse(self.codec,atom))
-            if token==self.codec.event_end_id:self._finish_probability();return out
+            if token==self.codec.event_end_id:
+                self._finish_probability()
+                if self._capture_hand:out.hand_probabilities=self._current_hand_plan
+                return out
             atom.append(token)
             if token==self.codec.end_note_id:
                 rendered=render_atom([self.codec.tokens[t] for t in atom])
@@ -715,6 +798,13 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             prepare_song(value,dataset,song)
         value.retry_stats=retry_stats
         return value
+
+    hand_records = {} if hasattr(model, 'hand_plan') else None
+    committed_hands = {} if hasattr(model,'hand_memory') else None
+    def record_hand(point, encoded):
+        values = getattr(encoded, 'hand_probabilities', None)
+        if values is not None:
+            hand_records[point.beat] = (point, point.note_text, values)
 
     while not done:
         progress.position(clock,points[-1].beat if points else Fraction(0),audio.duration_sec,events=len(points))
@@ -964,6 +1054,14 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         if args.max_events and len(points)>=args.max_events:raise ValueError('max_events would truncate the chart; increase the limit')
         # Alternatives may have changed decoder KV: retain only the unchanged prefix.
         points.append(point)
+        if hand_records is not None:record_hand(point,encoded)
+        if committed_hands is not None and not (history_edited or accepted_omissions):
+            actual=[*target,*encoded]
+            sampler._rewind(actual)
+            sampler._logits(actual)
+            previous=points[-2] if len(points)>1 else None
+            committed_hands[point.beat]=(point,point.note_text,previous,
+                sampler._read_committed_hands(len(sampler.prefix)+len(actual)-1))
         progress.position(clock,point.beat,audio.duration_sec,events=len(points))
         if recovery.commit(point.beat):release_trials.clear();native_memo.clear()
         if history_edited or accepted_omissions:
@@ -990,7 +1088,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         progress.update(force=True,stage='refining')
     points,guard,self_refine_report=refine_worst_spans(points,guard,args=args,song=song,tempo=tempo,
         first=first,end=end,make_sampler=_refine_sampler,new_guard_fn=_new_guard,
-        check_window=_check_window,guard_options=tail_settings,bypassed_events=bypassed_events)
+        check_window=_check_window,guard_options=tail_settings,bypassed_events=bypassed_events,
+        **({'record_hand':record_hand} if hand_records is not None else {}))
     progress.update(force=True,stage='exporting',events=len(points))
     from .tail_guard import cleanup
     points,tail_report=cleanup(points,tempo,first,guard)
@@ -1030,6 +1129,56 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
     report['cpu_runtime']=getattr(args,'cpu_runtime',None)
+    if hand_records is not None:
+        from .hand_plan import trace
+        post=_committed_readouts(points,committed_hands,_refine_sampler) if committed_hands is not None else None
+        vectors=[];origins=[]
+        for index, point in enumerate(points):
+            if post is not None:
+                vectors.append(post[index][0])
+                origins.append(post[index][-1])
+                continue
+            saved = hand_records.get(point.beat)
+            if saved is not None and saved[0] is point and saved[1] == point.note_text:
+                vectors.append(saved[2]);origins.append('sampled')
+            else:
+                # Native repair/cleanup may synthesize an event. Identify this
+                # forced beat explicitly; its notes never enter the prediction.
+                replay = make_sampler(points[:index])
+                replay._logits(model.codec._time(point.beat))
+                vectors.append(replay._read_hand_plan());origins.append('repair_replay')
+        values = torch.stack(vectors).cpu().tolist() if vectors else []
+        # The first weak teacher was measured on short rim episodes clear of
+        # sustained actions. Do not report its side estimate under a live hold
+        # (or a pending/active slide) as though it had the same coverage.
+        from bisect import bisect_left, bisect_right
+        from maichart.generation.event_compile import expand_compact_taps, _split_top_level_slashes
+        from maichart.generation.sustain_state import SustainStateIndex
+        markers = (SustainStateIndex(points,tempo,first).markers
+                   if any('[' in pt.note_text for pt in points) else [])
+        starts = sorted(m['second'] for m in markers)
+        ends = sorted(m['end_second'] for m in markers)
+        events = []
+        for point,origin,vector in zip(points,origins,values,strict=True):
+            second = clock.at(point.beat)
+            clear = bisect_right(starts,second+1e-7) == bisect_left(ends,second-1e-7)
+            notes = '/'.join(token for atom in _split_top_level_slashes(point.note_text)
+                             for token in expand_compact_taps(atom))
+            events.append(dict(beat=str(point.beat),second=second,notes=notes,origin=origin,
+                               prediction=trace(vector,notes,supported_context=clear)))
+        report['hand_predictions'] = dict(policy=config.hand_plan_policy,
+            chart_file_sha256=hashlib.sha256(output.read_bytes()).hexdigest(),
+            source='model_before_layout', confidence_basis='agreement_with_algorithmic_training_targets',
+            events=events)
+        if post is not None:
+            from .hand_memory import FEEDBACK, report as describe_readout
+            host=torch.stack([entry[1] for entry in post]).cpu() if post else []
+            for event,logits,(_,_,row,facts,origin) in zip(events,host,post,strict=True):
+                event['after_layout']=dict(origin=origin,actions=describe_readout(logits,torch.tensor(row),getattr(model,'hand_qualified',())),
+                    **facts)
+            report['hand_predictions'].update(source='model_before_and_after_layout',after_layout_basis='ordinal_weak_teacher_uncalibrated',
+                after_layout_scope='tap_hold_touch_heads_and_joint_edges',qualified_fields=list(getattr(model,'hand_qualified',())),
+                feedback_enabled=config.hand_plan_policy==FEEDBACK and not getattr(args,'no_hand_memory_feedback',False))
     intent_plan = sampler_options.get('intent_options', {}).get('intent_plan')
     report['phrase_intent'] = dict(requested=intent_mode, policy=checkpoint_intent,
         status='off' if intent_plan is None else 'selected' if intent_plan.strength > 0 else 'abstained')

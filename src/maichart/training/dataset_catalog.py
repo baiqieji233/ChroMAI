@@ -250,6 +250,24 @@ def _auto_quality_scope(manifests, requested):
     return tuple(sorted((available[path] for path in selected), key=str.casefold))
 
 
+def _mechanics_scope(manifests, requested, family):
+    if requested is None:
+        return ()
+    if not isinstance(requested, (list, tuple)) or any(
+        not isinstance(value, (str, Path)) or not str(value).strip() for value in requested
+    ):
+        raise ValueError("仅练动作的来源必须是训练清单路径列表")
+    selected = {Path(value).resolve() for value in requested}
+    available = {Path(value).resolve(): str(Path(value).resolve()) for value in manifests}
+    if selected and family != "chart_composer_v2":
+        raise ValueError("按来源练动作仅适用于 Composer v2")
+    if selected - available.keys():
+        raise ValueError("请先勾选用于练动作的数据集")
+    if selected and selected == available.keys():
+        raise ValueError("请至少保留一个「完整学习」来源，用于学习如何随音乐写谱")
+    return tuple(sorted((available[path] for path in selected), key=str.casefold))
+
+
 def merge_training_manifests(
     manifest_paths: list[str | Path],
     output_path: str | Path,
@@ -259,6 +277,7 @@ def merge_training_manifests(
     merge_annotations: bool = True,
     model_family: str | None = None,
     auto_quality_manifests: list[str | Path] | None = None,
+    mechanics_manifests: list[str | Path] | None = None,
     _composition_identity: str | None = None,
     _source_versions: dict[str, Any] | None = None,
     _published_root: Path | None = None,
@@ -280,6 +299,7 @@ def merge_training_manifests(
     if not manifest_paths:
         raise ValueError("At least one training manifest is required.")
     auto_scope = _auto_quality_scope(manifest_paths, auto_quality_manifests)
+    mechanics = _mechanics_scope(manifest_paths, mechanics_manifests, model_family)
     loaded = []
     for position, raw_path in enumerate(manifest_paths):
         path = Path(raw_path).resolve()
@@ -306,6 +326,7 @@ def merge_training_manifests(
     loaded = sorted(
         normalized_loaded,
         key=lambda item: (
+            str(item[0]) in mechanics,
             bool(item[1].get("candidate_pool") or item[1].get("reviewed_training")),
             bool(item[1].get("reviewed_training")),
             str(item[0]).casefold(),
@@ -369,7 +390,7 @@ def merge_training_manifests(
         return audio_hash_cache[key]
 
     output = Path(output_path).resolve()
-    if auto_scope is not None and any(output == item[0] for item in loaded):
+    if (auto_scope is not None or mechanics) and any(output == item[0] for item in loaded):
         raise ValueError("按来源采用自动体检时，请使用独立的组合清单")
     songs: list[dict[str, Any]] = []
     seen_charts: set[tuple[str, int]] = set()
@@ -454,6 +475,11 @@ def merge_training_manifests(
                         auto_records_by_key.setdefault(key, []).append(record)
         for song in payload.get("songs", []):
             copied = copy.deepcopy(song)
+            if str(manifest_path) in mechanics:
+                copied["learning_role"] = "mechanics"
+                for difficulty in copied.get("difficulties", []):
+                    if isinstance(difficulty, dict):
+                        difficulty["learning_role"] = "mechanics"
             is_reviewed = is_reviewed_manifest or bool(copied.get("reviewed_only"))
             original_song_id = str(copied.get("song_id") or "unknown")
             copied["original_song_id"] = original_song_id
@@ -477,6 +503,12 @@ def merge_training_manifests(
                 except (TypeError, ValueError):
                     index = -1
                 chart_key = (str(maidata_path), index)
+                if (str(manifest_path) in mechanics and chart_key in owners
+                        and owners[chart_key]["source_manifest"] not in mechanics):
+                    if owners[chart_key].get("audio_path") != copied.get("audio_path"):
+                        raise ValueError(f"同一谱面指向不同音频：{maidata_path}:{index}")
+                    duplicate_count += 1
+                    continue
                 if not (is_reviewed or is_candidate or song.get("candidate_pool")):
                     for record in auto_records_by_key.get(chart_key, ()):
                         if record.get("audio_path") == copied.get("audio_path") or not record.get("audio_path"):
@@ -542,6 +574,10 @@ def merge_training_manifests(
                                 else:
                                     _, contribs = extracted
                                     content_key = (valid_c_sha, valid_a_sha, index) if valid_c_sha and valid_a_sha else None
+                                    if (str(manifest_path) in mechanics and content_key in zero_content_owners
+                                            and owners[zero_content_owners[content_key]]["source_manifest"] not in mechanics):
+                                        duplicate_count += 1
+                                        continue
                                     if _published_root is not None:
                                         preview_owner = chart_key
                                         if chart_key not in zero_owner_keys and content_key is not None:
@@ -617,6 +653,8 @@ def merge_training_manifests(
         owner = owners.get(key)
         # A sidecar may also annotate charts outside this selected split.
         if owner is None:
+            continue
+        if (annotation_manifest in mechanics) != (owner.get("source_manifest") in mechanics):
             continue
         # Candidate / reviewed sidecars deliberately contain zero-weight unknown records.
         # They must never override a duplicate owned by an ordinary source.
@@ -739,6 +777,10 @@ def merge_training_manifests(
     if auto_scope is not None:
         auto_metadata["auto_quality_manifests"] = list(auto_scope)
     if _composition_identity is not None:
+        if mechanics:
+            _composition_identity = hashlib.sha256(
+                _composition_identity.encode("ascii") + b"\0mechanics\0" + json.dumps(mechanics).encode()
+            ).hexdigest()
         if auto_scope is not None:
             _composition_identity = hashlib.sha256(
                 _composition_identity.encode("ascii")
@@ -804,6 +846,8 @@ def merge_training_manifests(
         "errors": [],
     }
     merged["manifest"] = str(output)
+    if mechanics:
+        merged["mechanics_manifests"] = list(mechanics)
     if auto_scope is not None:
         merged["auto_quality_manifests"] = list(auto_scope)
     merged["raw_root"] = str(output.parent)
@@ -825,6 +869,7 @@ def merge_training_manifests(
         merged["summary"]["supervision"] = supervision_budget(
             [path for path, _, _, _ in loaded],
             _accepted={(owner["source_manifest"], (key[0].casefold(), key[1])) for key, owner in owners.items()},
+            mechanics_manifests=mechanics,
         )
     if used_auto_sources:
         inherited_path = save_auto_annotations(output, auto_records, audit_metadata=auto_metadata, composed=True)
@@ -897,17 +942,19 @@ def compose_datasets(
     published_root: Path | None = None,
     preview_audio_digest=None,
     auto_quality_manifests: list[str | Path] | None = None,
+    mechanics_manifests: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     """Prepare a stable source selection without changing a single source."""
     if not manifests:
         raise ValueError("至少需要一份训练 manifest")
     manifests = list(dict.fromkeys(str(Path(value).resolve()) for value in manifests))
     auto_scope = _auto_quality_scope(manifests, auto_quality_manifests)
+    mechanics = _mechanics_scope(manifests, mechanics_manifests, model_family)
     for value in manifests:
         path = Path(value)
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
         target = _contract(payload, path).get("target_schema")
-        if model_family in {"event_v1", "event_ctx_v1"} and target != "event_v1":
+        if (mechanics or model_family in {"event_v1", "event_ctx_v1"}) and target != "event_v1":
             raise ValueError(f"{path.parent.name} 不是事件模型预处理清单，请选择当前模型族重新预处理")
         if model_family == "legacy_frame_v2" and target == "event_v1":
             raise ValueError("事件模型清单不能用于旧固定帧模型，请重新预处理")
@@ -973,6 +1020,7 @@ def compose_datasets(
             manifests, target, dataset_ids=dataset_ids, dataset_names=dataset_names,
             merge_annotations=True, model_family=model_family,
             auto_quality_manifests=auto_scope,
+            mechanics_manifests=mechanics,
             _composition_identity=composition_identity, _source_versions=source_versions,
             _published_root=published_root,
             _preview_audio_digest=preview_audio_digest,

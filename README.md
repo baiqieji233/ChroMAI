@@ -6,6 +6,14 @@
 
 [近期更新 · 盘面走势、Slide 轨迹与局部变速](docs/explanations/COMPOSER_V2_GEOMETRY_AND_TIMING_ZH.md)
 
+[查看乐句手顺与启用下一组动作预判（实验）](docs/explanations/COMPOSER_V2_HAND_PLAN_ZH.md)
+
+[训练手顺读出与反馈、预计算缓存及短训结果](docs/explanations/COMPOSER_V2_HAND_MEMORY_DESIGN_ZH.md)
+
+**单独查看谱面手顺**　双击 [启动手顺预览.bat](启动手顺预览.bat)，选择歌曲文件夹或 Simai 谱面、难度，点击「计算并预览」。默认地址为 `http://127.0.0.1:17868/`。「手顺标注」以蓝、橙表示左、右手，证据不足时保留音符原色，盘面下方显示置信等级。切到「方案着色」可在同一拍位对照连扫与分段两种候选。批量导出标注可用 `python -m maichart.legacy_hands.batch 谱面目录 --slot 5 --mode labels --output hands.sqlite`。置信等级是候选比较得出的启发式结果，缺标记为 `hand: null`，尚未用真人手元校准。
+
+播放器支持慢放、逐帧和手部轨迹，手顺计算使用 CPU。原生音符着色使用带手色接口的 MiaView，普通版可查看原谱和轨迹。迁移到另一台电脑时可复制完整的 `webui_workspace/preview_runtime/miaview` 目录以保留手色版。[手色渲染器源码补丁及构建方法](tools/miaview_hand_colors/README.md)
+
 ---
 
 ## 一、 3 分钟快速上手（下载项目与模型后直接写谱）

@@ -536,6 +536,20 @@
   }
   window.addEventListener('workspace-mode-changed',event=>workspacePreview(event.detail.mode));
   window.addEventListener("pagehide", () => { clearTimeout(installTimer); observer.disconnect(); release(); }, {once: true});
+  document.getElementById('reviewHandPhrase')?.addEventListener('click',()=>{
+    const chart=entry?.charts[selected];
+    if(!chart?.url){message('请先打开一张谱面。',true);return;}
+    const range=globalThis.FeedbackRange?.get();
+    const start=range?.start_sec ?? Math.max(0,lastTransport?.currentTime || 0);
+    const duration=Number(lastTransport?.duration || chart.audio_duration_sec);
+    const end=range?.end_sec ?? (duration>start ? Math.min(start+12,duration) : start+12);
+    if(!(end>start && end-start<=60.001)){message('请在时间轴上选择最长 60 秒的乐句。',true);return;}
+    const resource=value=>new URL(value,location.href).searchParams.get('id') || '';
+    const params=new URLSearchParams({chart:resource(chart.url),slot:entry.source_kind==='training_source'?5:chart.difficulty_index,start,end});
+    if(chart.audio_url)params.set('audio',resource(chart.audio_url));
+    if(chart.generation_report_url)params.set('report',resource(chart.generation_report_url));
+    void pause();window.open('/api/preview/hands?'+params,'_blank','noopener');
+  });
   globalThis.ChartPreview = {offerTask, openTask, selectTask, supportsTask,refreshHistory,chooseChart,playRange,pause,clearRange,seek,
     openSource(value,{scroll=true}={}) {++requestSerial;show(value);panel.open=true;if(scroll)panel.scrollIntoView({behavior:'smooth',block:'start'});void activate();},
     setTrainingDataset(manifest) {

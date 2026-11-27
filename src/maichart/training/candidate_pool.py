@@ -1526,13 +1526,14 @@ def _budget_charts(manifest, payload):
                 yield song, difficulty, int(index)
 
 
-def supervision_budget(manifests, *, _accepted=None, progress=None):
+def supervision_budget(manifests, *, _accepted=None, progress=None, mechanics_manifests=()):
     """Estimate weighted heads; accepted owners are supplied by dataset composition.
 
     Standalone estimation keeps each source's occurrences, as before. Composition
     passes _accepted to count only the selected owner of duplicate charts.
     """
     sources, warnings = [], []
+    mechanics = {Path(path).resolve() for path in mechanics_manifests}
     loaded = []
     if progress:
         progress(dict(completed=0, total=0, stage="loading", source=""))
@@ -1554,6 +1555,7 @@ def supervision_budget(manifests, *, _accepted=None, progress=None):
         metadata = _read(manifest.with_name("pool.json")) if candidate else None
         timing = layout = 0.
         chart_count = 0
+        mechanics_count = 0
         if candidate and not record_index:
             completed += len(charts)
             if progress:
@@ -1573,6 +1575,10 @@ def supervision_budget(manifests, *, _accepted=None, progress=None):
             record = (candidate_record(manifest, song, difficulty, matches, _metadata=metadata)
                       if candidate else next(iter(matches), None))
             if candidate and record is None:
+                continue
+            if manifest in mechanics or difficulty.get('learning_role', song.get('learning_role')) == 'mechanics':
+                mechanics_count += 1
+                chart_count += 1
                 continue
             if record and not candidate:
                 try:
@@ -1616,7 +1622,8 @@ def supervision_budget(manifests, *, _accepted=None, progress=None):
                 timing += count * t * weight
                 layout += count * c * weight
         sources.append(dict(manifest=str(manifest), candidate_pool=candidate, charts=chart_count,
-                            timing_note_heads=timing, layout_note_heads=layout))
+                            timing_note_heads=timing, layout_note_heads=layout,
+                            **({'mechanics_charts': mechanics_count} if mechanics_count else {})))
     total_t, total_c = sum(s["timing_note_heads"] for s in sources), sum(s["layout_note_heads"] for s in sources)
     for source in sources:
         source.update(timing_share=source["timing_note_heads"] / total_t if total_t else 0.,

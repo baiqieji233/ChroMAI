@@ -59,7 +59,7 @@
       "ticks_per_beat", "max_tokens", "window_beats", "history_beats", "future_beats", "audio_backend");
     if (mode === "finetune") keys.push("audio_layers");
     if (mode !== "resume") keys.push("local_audio_block_beats", "music_context", "rhythm_structure", "onset_readout",
-      "intensity_curve", "future_configuration_policy", "future_configuration_weight", "spatial_policy", "intent_policy");
+      "intensity_curve", "future_configuration_policy", "future_configuration_weight", "spatial_policy", "intent_policy", "hand_plan_policy");
     return {mode, ...Object.fromEntries(keys.filter((key) => Object.hasOwn(settings, key)).map((key) => [key, settings[key]]))};
   }
 
@@ -330,6 +330,7 @@
         : `音乐与写法联动：${nameOf('v2TrainMusicalRelationPolicy')}${value('v2TrainMusicalRelationPolicy')==='off'?'':` · 强化上限 ${value('v2TrainMusicalRelationFraction')}`}；局部写法学习：${nameOf('v2TrainFutureConfigurationPolicy')}${value('v2TrainFutureConfigurationPolicy')==='off'?'':` · 学习权重 ${value('v2TrainFutureConfigurationWeight')}`}`,
       ...(mode==='finetune' ? [`微调范围：${nameOf('v2TrainFinetuneScope')}`] : []),
       ...(value('v2TrainIntentPolicy')==='phrase_intent_v1' ? ['编排构思学习 · 启用（实验）'] : []),
+      ...(handPlanEnabled() ? [`手顺学习 · ${handPolicyNames[effectiveHandPolicy()]}`] : []),
       `前文纠错训练 · ${nameOf('v2TrainTimingRecovery')}`,
       `总目标 ${value("v2TrainEpochs")} 轮 · 批大小 ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")}（单步等效 ${Number(value("v2TrainBatchSize"))*Number(value("v2TrainGradAccumulation"))}） · 精度 ${nameOf("v2TrainPrecision")}`,
       `显存优化：${nameOf("v2TrainActivationCheckpointing")} · CUDA 预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "自动"} · 音频内存缓存 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,

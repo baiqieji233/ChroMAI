@@ -1,0 +1,89 @@
+diff --git a/native/browser-host.cpp b/native/browser-host.cpp
+index 5eab1ab2e1670696851d86962102e8a916aa63d2..c42ccbcfa5794e4db9a7ada4799553032c8cc205 100644
+--- a/native/browser-host.cpp
++++ b/native/browser-host.cpp
+@@ -242,6 +242,66 @@ EMSCRIPTEN_KEEPALIVE const char* miacode_load(const char* text, int difficultyId
+     chartLoaded = true;
+     return cachedLoadResponse.constData();
+ }
++EMSCRIPTEN_KEEPALIVE const char* miacode_hand_notes() {
++    QJsonArray notes;
++    for (const auto& marker : state.noteMarkers) {
++        if (marker.parseOrder < 0) continue;
++        QJsonArray ends;
++        const auto& paths = marker.type == "wifi" ? marker.wifiLanePoints : marker.slideSegmentPoints;
++        for (const auto& segment : paths)
++            if (!segment.isEmpty()) ends.append(QJsonArray{segment.last().x(), segment.last().y()});
++        notes.append(QJsonArray{marker.parseOrder, marker.type,
++            marker.touchPad.isEmpty() ? QString("A%1").arg(marker.lane) : marker.touchPad,
++            marker.second, marker.slideTraceSecond, marker.endSecond, ends, marker.slideTrackKey,
++            marker.hasHeadStar, marker.isMine, marker.headMine, marker.trackMine});
++    }
++    return json({{"notes", notes}});
++}
++
++EMSCRIPTEN_KEEPALIVE const char* miacode_set_hand_notes(const char* input) {
++    const auto document = QJsonDocument::fromJson(input);
++    if (!document.isArray() || document.array().size() > state.noteMarkers.size())
++        return json({{"error", "Invalid hand-color table"}});
++    QHash<int, QJsonArray> rows;
++    for (const auto& item : document.array()) {
++        const auto row = item.toArray();
++        if ((row.size() != 5 && row.size() != 6) || row[0].toInt(-1) < 0 || !row[4].isArray())
++            return json({{"error", "Invalid hand-color record"}});
++        rows.insert(row[0].toInt(), row);
++    }
++    int heads = 0, tracks = 0;
++    for (auto& marker : state.noteMarkers) {
++        const auto row = rows.value(marker.parseOrder);
++        marker.previewHandHead = 0;
++        marker.previewHandTrack = 0;
++        marker.previewHandTrackOther = 0;
++        marker.previewHandCenter = -1;
++        marker.previewHandChanges.clear();
++        if (row.isEmpty()) continue;
++        marker.previewHandHead = qBound(0, row[1].toInt(), 2);
++        marker.previewHandTrack = qBound(0, row[2].toInt(), 2);
++        marker.previewHandTrackOther = qBound(0, row[3].toInt(), 2);
++        if (row.size() == 6)
++            marker.previewHandCenter = qBound(0, row[5].toInt(), 2);
++        double last = marker.slideTraceSecond - 0.0001;
++        for (const auto& change : row[4].toArray()) {
++            const auto point = change.toArray();
++            if (point.size() != 2) continue;
++            const double second = point[0].toDouble(-1.0);
++            const int side = point[1].toInt();
++            if (second < last || second > marker.endSecond + 0.0001 || (side < 0 || side > 2))
++                continue;
++            last = second;
++            marker.previewHandChanges.append({second, side});
++        }
++        heads += marker.previewHandHead != 0;
++        tracks += marker.previewHandTrack != 0 || marker.previewHandTrackOther != 0 || marker.previewHandCenter > 0;
++    }
++    ++state.sceneContentRevision;
++    refresh();
++    return json({{"heads", heads}, {"tracks", tracks}});
++}
++
+ EMSCRIPTEN_KEEPALIVE void miacode_seek(double second) {
+     if (!qIsFinite(second)) return;
+     state.playheadSeconds = qMax(0.0, second);
+diff --git a/renderer/player-engine.mjs b/renderer/player-engine.mjs
+index c85e34899f343f81dd67a841adb03b780b2fa656..84ac48d32c91cb9c3a25a9cded6e414efdb28d41 100644
+--- a/renderer/player-engine.mjs
++++ b/renderer/player-engine.mjs
+@@ -272,6 +272,13 @@ export function createPlayerEngine(view) {
+     }
+     emit("playing", { elapsedMs: elapsed() });
+   }
++  // The observation page and renderer share the review server's origin.
++  // Send only assignments. The native renderer owns chart and skin geometry.
++  window.miaHandNoteColors = Object.freeze({
++    notes: () => JSON.parse(call("miacode_hand_notes", "string", [], [])).notes,
++    assign: (rows) => JSON.parse(call("miacode_set_hand_notes", "string", ["string"], [JSON.stringify(rows)])),
++  });
++
+   function seek(second) {
+     if (!chart) return;
+     audio.seek(second);

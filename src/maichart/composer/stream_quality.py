@@ -115,7 +115,8 @@ def _motion_actions(points,tempo,clock,cache=None):
                         # Keep the preparation bound for motion stream consumers.
                         # Hand assignment uses trace for the start of contact.
                         jobs.append(dict(start=max(second,trace-.12),onset=second,trace=trace,end=finish+.016666667,
-                            position=position,segments=segments,kind=kind))
+                            position=position,segments=segments,kind=kind, track_key=marker.get('slide_track_key',''),
+                            head_contact=bool(marker.get('has_head_star',True))))
                 except (ValueError,KeyError,TypeError) as exc:
                     unknown.append(dict(beat=str(point.beat),raw=marker['raw'],reason=str(exc)))
             else:pulses.append((second,position,'touch' if kind=='touch' else 'button',RADII[pad[0]]/205.))

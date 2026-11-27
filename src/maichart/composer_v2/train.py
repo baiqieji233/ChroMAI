@@ -7,6 +7,7 @@ import gc
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
 import shutil
@@ -20,7 +21,7 @@ from .codec import ComponentCodec
 from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Dataset,
                    collate_composer_v2, LengthBucketBatchSampler)
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
-from . import chart_dialect, intent_policy, learning_rate, timing_recovery, spatial_policy
+from . import chart_dialect, hand_plan, intent_policy, learning_rate, timing_recovery, spatial_policy
 from .defaults import AUDIO_WRITING_POLICIES
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, FUTURE_CONFIGURATION_POLICY, configuration_view_fraction,
@@ -84,6 +85,10 @@ def parser():
                         help=f'Weight of the ordered future chart objective (default {FUTURE_CONFIGURATION_WEIGHT})')
     result.add_argument('--finetune-scope', choices=FINETUNE_SCOPE_CHOICES, default='auto',
                         help='Train all parameters, only music-reading parameters, or only the experimental intent module')
+    result.add_argument('--hand-plan-policy',choices=hand_plan.CHOICES,default='auto',
+                        help='手顺预判：每组落笔前预测动作与衔接。自动沿用检查点，新模型关闭。')
+    result.add_argument('--hand-label-limit',type=int,help='手顺弱标注训练谱面上限，默认 128，0 为全量；续训继承')
+    result.add_argument('--hand-label-workers',type=int,help='手顺缓存并行谱面数，默认最多 4')
     result.add_argument('--spatial-policy', choices=spatial_policy.CHOICES, default='auto',
                         help='Auto inherits the checkpoint; opt in on a separate fine-tune or fresh run.')
     result.add_argument('--intent-policy', choices=intent_policy.CHOICES, default='auto',
@@ -137,7 +142,7 @@ def configure_trainable_parameters(model, scope):
                            and (path[2] in ('local_attention', 'song_attention') or
                                 path[2] == 'norms' and path[3] in ('1', '2')))
         music_projection = path[0] in ('paired_music', 'entry_preview', 'future_configuration_head', 'local_writing',
-                                       'spatial_history', 'intent')
+                                       'spatial_history', 'intent','hand_plan','hand_memory')
         trainable = (path[0] == 'intent' if scope == 'intent_only'
                      else scope == 'all' or decoder_reading or music_projection)
         parameter.requires_grad_(trainable)
@@ -342,6 +347,14 @@ def _phase_budget(batch,phase_tokens):
 
 def _validate(model,loader,device,precision,maximum):
     model.validation_intent_metrics = {}
+    has_hand = getattr(model.config,'hand_plan_policy','off')!='off'
+    if has_hand:
+        val_hand=torch.zeros(14,device=device)
+    has_memory=hasattr(model,'hand_memory')
+    if has_memory:
+        val_memory=torch.zeros(2,device=device)
+        evidence=torch.zeros(3,len(hand_plan.hand_memory.FIELDS),device=device)
+        per_recording={}
     has_intent = getattr(model.config, 'intent_policy', 'off') != 'off'
     model.validation_phase_loss=None
     model.validation_time_loss=None
@@ -397,6 +410,20 @@ def _validate(model,loader,device,precision,maximum):
             finite=finite&torch.isfinite(loss)
             numerator+=metrics['token_loss']*max(1.,mass);mass_sum+=mass
             curve_numerator+=metrics['curve_loss']*max(1.,mass)
+            if has_hand and 'hand_prediction' in output:
+                val_hand[:2]+=torch.stack((metrics['hand_plan_sum'],metrics['hand_plan_mass']))
+                val_hand[2:]+=hand_plan.calibration_sums(output['hand_prediction'][0],batch)
+            if has_memory and 'hand_memory_evidence' in metrics:
+                val_memory+=torch.stack((metrics['hand_memory_sum'],metrics['hand_memory_mass']))
+                counts=metrics['hand_memory_evidence']
+                evidence+=counts.sum((0,3))
+                train_hashes=getattr(model,'hand_training_recordings',None)
+                for recording,values in zip(batch['hand_recordings'],counts):
+                    if recording and train_hashes is not None and recording not in train_hashes:
+                        if recording in per_recording:
+                            per_recording[recording]+=values
+                        else:
+                            per_recording[recording]=values.clone()
             if has_intent:
                 intent_totals += torch.stack([metrics[k].detach() for k in intent_policy.METRICS]) * mass
             if getattr(model.config,'future_configuration_policy','off') != 'off':
@@ -421,6 +448,18 @@ def _validate(model,loader,device,precision,maximum):
     if has_intent:
         model.validation_intent_metrics = dict(zip(
             ('validation_' + k for k in intent_policy.METRICS), (intent_totals / mass_sum).tolist()))
+    if has_hand:
+        loss_sum,mass,*calibration=val_hand.cpu().tolist()
+        model.validation_intent_metrics.update(validation_hand_plan_loss=loss_sum/mass if mass else None,
+            validation_hand_plan_calibration=hand_plan.calibration_report(calibration))
+    if has_memory:
+        numerator_memory,mass_memory=val_memory.tolist()
+        model.hand_qualified=hand_plan.hand_memory.qualified_fields({k:v.cpu().numpy() for k,v in per_recording.items()})
+        model.validation_intent_metrics.update(validation_hand_memory_loss=numerator_memory/mass_memory if mass_memory else None,
+            validation_hand_memory_qualified=model.hand_qualified,validation_hand_memory_recordings=len(per_recording),
+            validation_hand_memory_evidence={field:dict(evaluated=int(n),strong=int(calls),
+                weak_disagreements=int(errors),coverage=calls/n if n else None)
+                for field,(n,calls,errors) in zip(hand_plan.hand_memory.FIELDS,evidence.T.tolist())})
     model.validation_phase_loss=float(phase_numerator)/phase_mass_sum if phase_mass_sum else None
     model.validation_time_loss=float(time_numerator)/time_mass_sum if time_mass_sum else None
     nonphase_mass=time_mass_sum-phase_mass_sum
@@ -568,12 +607,17 @@ def train(args):
         getattr(args, 'musical_relation_policy', 'auto'), getattr(args, 'musical_relation_fraction', None),
         feature='musical_relation', choices=MUSICAL_RELATION_CHOICES, default=MUSICAL_RELATION_FRACTION,
         sequence_policy=args.sequence_policy, saved_config=parent_contract, resume=bool(args.resume))
+    args.hand_plan_policy=hand_plan.resolve(getattr(args,'hand_plan_policy','auto'),saved=parent_model,resume=bool(args.resume))
+    previous_hand=parent_model.get('hand_plan_policy','off')
+    hand_migration=bool(parent and previous_hand!=args.hand_plan_policy)
     args.intent_policy = intent_policy.resolve(getattr(args, 'intent_policy', 'auto'), saved=parent_model,
                                               resume=bool(args.resume), sequence=args.sequence_policy)
     previous_intent = parent_model.get('intent_policy', 'off')
     args.finetune_scope = resolve_finetune_scope(
         getattr(args, 'finetune_scope', 'auto'), parent_contract, resume=bool(args.resume),
         initialized=bool(args.init_checkpoint), intent_policy=args.intent_policy, previous_intent=previous_intent)
+    if hand_migration and args.finetune_scope=='intent_only':
+        raise ValueError('启用手顺预判请选择全参数或音乐读取连接微调')
     backbone = intent_policy.fixed_backbone_options(vars(args), saved=parent_model,
                                                    scope=args.finetune_scope, resume=bool(args.resume))
     if backbone:
@@ -599,7 +643,7 @@ def train(args):
         args.musical_relation_policy != parent_contract.get('musical_relation_policy', 'off') or
         args.musical_relation_fraction != parent_contract.get('musical_relation_fraction', MUSICAL_RELATION_FRACTION) or
         args.future_configuration_weight != parent_model.get('future_configuration_weight', FUTURE_CONFIGURATION_WEIGHT) or
-        spatial_migration or future_migration or args.finetune_scope != 'all' or
+        hand_migration or spatial_migration or future_migration or args.finetune_scope != 'all' or
         args.finetune_scope != parent_contract.get('finetune_scope', 'all')))
     if learning_contract_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
         raise ValueError('Changing musical relation, ordered future, or fine-tuning scope requires a new checkpoint directory')
@@ -721,7 +765,7 @@ def train(args):
     audio_block_migration = bool(parent and args.local_audio_block_beats != inherited_audio_block)
     if audio_block_migration and (args.resume or directory == source_directory or any(p.exists() for p in artifacts)):
         raise ValueError('Changing local audio sharing requires init-checkpoint in a new directory')
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization","future_configuration_policy","future_configuration_weight","spatial_policy","intent_policy")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization","future_configuration_policy","future_configuration_weight","spatial_policy","intent_policy","hand_plan_policy")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
@@ -734,6 +778,7 @@ def train(args):
         comparable_config['local_audio_block_beats'] = inherited_audio_block
     if args.init_checkpoint:
         comparable_config['intent_policy'] = previous_intent
+        comparable_config['hand_plan_policy'] = previous_hand
         comparable_config['spatial_policy'] = previous_spatial
         comparable_config['future_configuration_policy'] = parent_config['future_configuration_policy']
         comparable_config['future_configuration_weight'] = parent_config['future_configuration_weight']
@@ -767,6 +812,8 @@ def train(args):
                        future_configuration_policy=args.future_configuration_policy,
                        reviewed_reference_policy=reviewed_ref,zero_unmarked_policy=zero_unmarked_policy,
                        reference_quality_policy=reference_quality_policy)
+        if args.hand_plan_policy != 'off':
+            options['hand_plan_policy'] = args.hand_plan_policy
         if args.spatial_policy != 'off':
             options['spatial_policy'] = args.spatial_policy
         if args.intent_policy != 'off':
@@ -793,6 +840,11 @@ def train(args):
                              '要使用扩充后的训练素材，请选「微调」并使用新检查点目录。') from error
         if auto_quality_policy == 'auto_v1' and dataset.auto_annotations_sha256 is None:
             raise ValueError('准备训练数据时未找到匹配的自动质检标注')
+        has_mechanics=any(getattr(s,'learning_role','full')=='mechanics' for s in dataset.songs)
+        if has_mechanics and (prefix_bank is not None or args.finetune_scope=='intent_only'):
+            raise ValueError('动作素材请与常规谱面混合，使用常规前文及全参数或音乐读取连接训练')
+        if has_mechanics and not any(getattr(s,'learning_role','full')=='full' for s in dataset.songs):
+            raise ValueError('请至少选择一个通过筛选的完整学习谱面')
         if prefix_bank is not None:
             generated_prefix.install(dataset, prefix_bank, args.generated_prefix_mode)
         vocabulary_changed = codec is not None and dataset.codec is not codec
@@ -806,7 +858,30 @@ def train(args):
         if args.sequence_policy=='continuous_events_v1':
             validation_options.update(timing_recovery_policy='off', musical_context_policy='off',
                                       auxiliary_validation=args.future_configuration_policy != 'off')
+        if args.hand_plan_policy!='off':
+            validation_options['full_sources_only']=True
         validation=dataset_class(args.validation_manifest,**validation_options) if args.validation_manifest else None
+    hand_cache_contract = {}
+    if args.hand_plan_policy in hand_plan.hand_memory.POLICIES:
+        from . import hand_label_cache
+        saved_labels=parent_contract.get('hand_labels',{})
+        limit=getattr(args,'hand_label_limit',None)
+        if limit is None:
+            limit=saved_labels.get('train',{}).get('limit',hand_label_cache.DEFAULT_LIMIT)
+        workers=getattr(args,'hand_label_workers',None)
+        if workers is None:
+            workers=min(4,os.cpu_count() or 1)
+        if args.resume and (saved_labels.get('train',{}).get('limit')!=limit or
+                            saved_labels.get('train',{}).get('revision')!=hand_label_cache.revision()):
+            raise ValueError('手顺缓存版本或取样上限已变化。请使用新目录微调')
+        for split,ds,cap in (('train',dataset,limit),('validation',validation,min(limit,32))):
+            if ds is not None:
+                emit('runtime',stage='hand_label_cache_start',split=split,limit=cap,workers=workers)
+                def progress(**stats):
+                    emit('runtime',stage='hand_label_cache_build',split=split,**stats)
+                identity_labels,stats=hand_label_cache.prepare(ds,limit=cap,workers=workers,progress=progress)
+                hand_cache_contract[split]=identity_labels
+                emit('runtime',stage='hand_label_cache_ready',split=split,**stats)
     if scorer is not None:
         emit('difficulty_fit', scorer=scorer.identity,cache_hits=scorer.hits,computed=scorer.computed,
              train_charts=len(dataset.songs), outside_range=sum(
@@ -876,6 +951,10 @@ def train(args):
         contract['finetune_scope'] = args.finetune_scope
     if args.spatial_policy != 'off':
         contract['spatial_policy'] = args.spatial_policy
+    if args.hand_plan_policy != 'off':
+        contract['hand_plan_policy'] = args.hand_plan_policy
+    if hand_cache_contract:
+        contract['hand_labels']=hand_cache_contract
     if args.intent_policy != 'off':
         contract['intent_policy'] = args.intent_policy
     if reviewed_ref!='off':contract['reviewed_reference_policy']=reviewed_ref
@@ -900,6 +979,9 @@ def train(args):
                         or not compatible_contract(parent["training_contract"],contract)):
         raise ValueError("Exact resume data/optimizer/schedule contract changed; retain the parent and use compatible finetune in a new directory")
     model=ComposerV2(config,codec).to(device)
+    if hasattr(model,'hand_memory'):
+        hashes=[getattr(s.audio,'identity',{}).get('audio_sha256') for s in dataset.songs]
+        model.hand_training_recordings=set(hashes) if all(hashes) else None
     from .training_memory import configure as configure_memory, configure_projection_packing, configure_decoder_flash_attention, cuda_stats
     memory_policy=configure_memory(model,getattr(args,'activation_checkpointing','auto'),device)
     projection_policy=configure_projection_packing(model,args.attention_projection_packing,device)
@@ -908,7 +990,7 @@ def train(args):
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
             parent_state = _extend_vocabulary_state(model, parent_state, parent_vocab_size)
-        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration or future_migration or spatial_migration or intent_migration:
+        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration or future_migration or spatial_migration or intent_migration or hand_migration:
             expected_missing = {'condition_missing.weight'} if migration else set()
             if music_migration:
                 expected_missing.update(k for k in model.state_dict() if k not in parent_state and
@@ -944,6 +1026,15 @@ def train(args):
                 parent_state, spatial_missing = spatial_policy.migrate_parameters(
                     model, parent_state, previous_spatial, config.spatial_policy)
                 expected_missing.update(spatial_missing)
+            if hand_migration:
+                for prefix,old,new in (
+                    ('hand_plan.',previous_hand!='off',args.hand_plan_policy!='off'),
+                    ('hand_memory.',previous_hand in hand_plan.hand_memory.POLICIES,
+                     args.hand_plan_policy in hand_plan.hand_memory.POLICIES)):
+                    if new and not old:
+                        expected_missing.update(k for k in model.state_dict() if k.startswith(prefix))
+                    elif old and not new:
+                        parent_state={k:v for k,v in parent_state.items() if not k.startswith(prefix)}
             if intent_migration:
                 if args.intent_policy != 'off':
                     expected_missing.update(k for k in model.state_dict() if k.startswith('intent.'))
@@ -1027,6 +1118,8 @@ def train(args):
         save_started = time.perf_counter()
         flush_epoch()
         saved_config = config.to_dict()
+        if args.hand_plan_policy=='off':
+            saved_config.pop('hand_plan_policy',None)
         if args.intent_policy == 'off':
             saved_config.pop('intent_policy', None)
         payload=dict(schema=SCHEMA,family=FAMILY,model_config=saved_config,config=saved_config,
@@ -1038,6 +1131,8 @@ def train(args):
             condition_contract=condition_contract(args.condition_policy),
             selection_loss=state["best_loss"] if state["best_loss"] is not None else state["last_loss"],
             best_provisional=state["best_loss"] is None)
+        if hasattr(model,'hand_memory') and hand_validation_step==state['optimizer_steps']:
+            payload['hand_memory_qualified']=list(getattr(model,'hand_qualified',()))
         save(artifacts[0],payload)
         if improved or not artifacts[1].exists():save(artifacts[1],payload)
         inference={key:value for key,value in payload.items() if key not in ("optimizer_state_dict","scaler_state_dict","rng_state")}
@@ -1075,10 +1170,20 @@ def train(args):
         best_basis=best_basis,activation_checkpointing=memory_policy,attention_projection_packing=projection_policy,
         decoder_flash_attention=flash_policy,biased_attention_backward="fp32_math_recompute_v1",
         attention_normalization=config.attention_normalization)
+    hand_validation_step=None
+    if args.resume and hasattr(model,'hand_memory') and 'hand_memory_qualified' in parent:
+        model.hand_qualified=list(parent['hand_memory_qualified'])
+        hand_validation_step=state['optimizer_steps']
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
     input_tokens=0;input_slots=0
     has_geometry = args.spatial_policy != 'off'
+    has_hand = args.hand_plan_policy != 'off'
+    if has_hand:
+        hand_running=torch.zeros(4,device=device)
+        hand_group=torch.zeros_like(hand_running)
+    group_mechanics_mass=0.
+    running_mechanics_mass=0.
     has_intent = args.intent_policy != 'off'
     if has_intent:
         intent_running = torch.zeros(len(intent_policy.METRICS), device=device)
@@ -1110,7 +1215,8 @@ def train(args):
             cpu_valid=math.isfinite(mass) and mass>=0
             # Keep the unnormalized numerator numerically modest for FP16;
             # divide by the complete update's quality-weighted token budget below.
-            budget=max(1.,mass) if cpu_valid else 1.
+            mechanics_mass=batch.get('mechanics_mass',0.)
+            budget=max(1.,mass+mechanics_mass) if cpu_valid else 1.
             batch=_device_batch(batch,device)
             if 'gesture_weights' in batch:
                 gesture_pairs_seen+=batch['gesture_weights'].numel()
@@ -1121,13 +1227,18 @@ def train(args):
                 replay_keys+=len(batch['layout_replay']['coordinates'])
                 running[7]+=metrics['layout_replay_changed']
             group_finite=group_finite&torch.isfinite(loss.detach())&cpu_valid
-            group_metrics[:7]+=torch.stack((metrics['token_loss']*budget,
+            group_metrics[:7]+=torch.stack((metrics['token_loss']*mass,
                 metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*max(1.,phase_mass),
-                metrics['curve_loss']*budget,loss.detach()*budget,metrics['future_configuration_loss']*budget))
+                metrics['curve_loss']*mass,loss.detach()*budget,metrics['future_configuration_loss']*mass))
             if has_geometry and 'slide_geometry_loss' in metrics:
                 group_metrics[7] += metrics['slide_geometry_loss'] * budget
             if has_intent:
                 intent_group += torch.stack([metrics[k].detach() for k in intent_policy.METRICS]) * mass
+            if has_hand and 'hand_plan_mass' in metrics:
+                hand_group[:2]+=torch.stack((metrics['hand_plan_sum'],metrics['hand_plan_mass']))
+                if 'hand_memory_sum' in metrics:
+                    hand_group[2:]+=torch.stack((metrics['hand_memory_sum'],metrics['hand_memory_mass']))
+            group_mechanics_mass+=mechanics_mass
             group_mass+=mass if cpu_valid else 0.
             group_time_mass+=time_mass if cpu_valid else 0.
             group_component_mass+=component_mass if cpu_valid else 0.
@@ -1138,9 +1249,14 @@ def train(args):
             if boundary:
                 scaler.unscale_(optimizer)
                 for parameter in trainable_parameters:
-                    if parameter.grad is not None:parameter.grad.mul_(1024./max(1.,group_mass))
+                    if parameter.grad is not None:parameter.grad.mul_(1024./max(1.,group_mass+group_mechanics_mass))
+                if group_mechanics_mass>0 and group_mass==0:
+                    # AdamW must not advance momentum/decay on the writing model for an aux-only update.
+                    for name,parameter in model.named_parameters():
+                        if not name.startswith(('hand_plan.observe.','hand_plan.predict.','hand_memory.readout.')):
+                            parameter.grad=None
                 norm=torch.nn.utils.clip_grad_norm_(trainable_parameters,1.)
-                finite=bool(group_finite&torch.isfinite(norm)&(group_mass>0))
+                finite=bool(group_finite&torch.isfinite(norm)&(group_mass+group_mechanics_mass>0))
                 attempt=int(state["update_attempts"])
                 factor=learning_rate.factor(attempt,args.lr_schedule,args.warmup_steps,total_updates,
                                             args.min_lr_ratio,args.lr_decay_end_step)
@@ -1149,6 +1265,9 @@ def train(args):
                     scaler.step(optimizer);state["optimizer_steps"]+=1
                     epoch_loss_gpu+=group_metrics[0];epoch_mass+=group_mass
                     running[:7]+=group_metrics[:7];running_mass+=group_mass
+                    running_mechanics_mass+=group_mechanics_mass
+                    if has_hand:
+                        hand_running+=hand_group
                     if has_geometry:
                         running[8] += group_metrics[7]
                     if has_intent:
@@ -1158,6 +1277,8 @@ def train(args):
                 else:emit("progress",stage="nonfinite_update_skipped",epoch=epoch,batch=batch_index+1,optimizer_steps=state["optimizer_steps"])
                 scaler.update();optimizer.zero_grad(set_to_none=True)
                 group_metrics.zero_();group_finite.fill_(True)
+                group_mechanics_mass=0.
+                if has_hand:hand_group.zero_()
                 if has_intent:
                     intent_group.zero_()
                 group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;group_relation_mass=0.
@@ -1177,7 +1298,11 @@ def train(args):
                     epoch_processed_batches=batch_index+1-cursor,update_attempts=state['update_attempts'],
                     optimizer_steps=state["optimizer_steps"],loss=values[0]/max(1.,running_mass),
                     loss_scope="run_quality_weighted_token_mean",
-                    curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
+                    **(dict(hand_plan_loss=float(hand_running[0]/hand_running[1].clamp_min(1.)),
+                            hand_plan_weight=float(hand_running[1])) if has_hand else {}),
+                    **(dict(hand_memory_loss=float(hand_running[2]/hand_running[3]) if hand_running[3]>0 else None,
+                            hand_memory_weight=float(hand_running[3])) if hasattr(model,'hand_memory') else {}),
+                    curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass+running_mechanics_mass),
                     future_configuration_loss=values[6]/max(1.,running_mass),
                     **(dict(zip(intent_policy.METRICS, (intent_running / max(1.,running_mass)).tolist())) if has_intent else {}),
                     **({'slide_geometry_loss':values[8]/max(1.,running_mass)} if has_geometry else {}),
@@ -1202,6 +1327,7 @@ def train(args):
                     emit('progress',stage='validation',epoch=epoch+1,total=len(validation_loader),
                          optimizer_steps=state['optimizer_steps'],scope='checkpoint',started_unix=time.time())
                     score=_validate_checkpoint(model,validation_loader,device,precision,args.validation_max_batches,pending=pending)
+                    hand_validation_step=state['optimizer_steps']
                     improved=state['best_loss'] is None or score<state['best_loss']
                     if improved:
                         state['best_loss']=score
@@ -1229,6 +1355,7 @@ def train(args):
                 emit('progress',stage='validation',epoch=epoch+1,total=len(validation_loader),
                      epoch_train_sec=epoch_train_sec,started_unix=time.time())
             validation_loss=_validate(model,validation_loader,device,precision,args.validation_max_batches)
+            hand_validation_step=state['optimizer_steps'] if validation_loss is not None else None
             validation_sec = time.perf_counter() - validation_started if validation_loader is not None else 0.
             flush_epoch()
             score=validation_loss if validation_loss is not None else state["last_loss"]

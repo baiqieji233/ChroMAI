@@ -36,7 +36,9 @@ class StreamDataset(ComposerV2Dataset):
                  musical_context_policy='off',musical_context_probability=MUSICAL_CONTEXT_PROBABILITY,
                  musical_relation_policy='off', musical_relation_fraction=.3,
                  future_configuration_policy='off', auxiliary_validation=False, spatial_policy='off',
-                 intent_policy='off', **kwargs):
+                 intent_policy='off', hand_plan_policy='off', **kwargs):
+        from .hand_plan import resolve
+        self.hand_plan_policy=resolve(hand_plan_policy)
         from .intent_policy import POLICY as INTENT_POLICY
         if intent_policy not in ('off', INTENT_POLICY):
             raise ValueError('Unknown phrase intent policy')
@@ -180,7 +182,7 @@ class StreamDataset(ComposerV2Dataset):
                     end, length = self.ranges[index], self.lengths[index]
                 else:
                     si, begin, end, length = recovery_slices[index]
-                if begin<2:continue
+                if begin<2 or getattr(self.songs[si],'learning_role','full')=='mechanics':continue
                 song=self.songs[si]
                 first=bisect.bisect_left(song.point_beats,song.point_beats[begin-1]-self._recovery_span,hi=begin)
                 if any(timing_recovery.is_tap(p) for p in song.points[first:begin-1]):
@@ -781,6 +783,10 @@ class StreamDataset(ComposerV2Dataset):
             out['entry_preview_features']=torch.as_tensor(entry_preview(profile,anchors))
         if getattr(self,'future_configuration_policy','off') in AUDIO_WRITING_POLICIES:
             out.update(self.writing_features(song,anchors))
+        from .hand_memory import POLICIES as MEMORY_POLICIES
+        if getattr(self,'hand_plan_policy','off') in MEMORY_POLICIES:
+            from .hand_timeline import Timeline
+            out['hand_timeline']=torch.from_numpy(Timeline(codec,song.clock).extend(ids))
         if _track_intent_overlap:
             reference_spans = []
             if aligned is not None:
@@ -828,6 +834,14 @@ class StreamDataset(ComposerV2Dataset):
             extra = float(scores[index]) * fraction / (1. - fraction)
             item['token_weights'] *= 1. + extra
             item['musical_relation_extra_fraction'] = extra / (1. + extra)
+        if getattr(self,'hand_plan_policy','off')!='off':
+            from .hand_plan import add_item
+            add_item(item,self,song,self._configuration(si),begin,end)
+            if song.learning_role=='mechanics':
+                item['mechanics_only']=True
+                item['token_weights'].zero_()
+                item['sample_weight'].zero_()
+                item['curve_teacher_allowed']=False
         if self.future_configuration_policy in AUDIO_WRITING_POLICIES:
             self._writing_targets(item,self._configuration(si),song,begin,end,
                                   offset=((index*17+self.training_epoch*37)%101+.5)/101)
@@ -838,7 +852,10 @@ class StreamDataset(ComposerV2Dataset):
                     item[field] = item[field].clone()
                     item[field][1:] = 0
                 item['curve_teacher_allowed'] = False
-        if has_intent:
+        if has_intent and item.get('mechanics_only'):
+            from .intent_data import empty_item
+            item.update(empty_item())
+        elif has_intent:
             from .intent_data import FUTURE_VIEW_PERIOD, add_item
             allow_future = (index + self.training_epoch) % FUTURE_VIEW_PERIOD == 1
             add_item(item, self, si, song, begin, end, allow_future=allow_future)
@@ -945,7 +962,12 @@ def collate_stream(items):
         'local_semantic':item['bank_semantic'][:1],'local_semantic_mask':item['bank_semantic_mask'][:1],
         'local_mask':item['local_mask'][0,:1],'local_beats':item['local_beats'][0,:1]} for item in items]
     out=collate_composer_v2(temporary)
+    if 'hand_timeline' in items[0]:
+        out['hand_timeline']=torch.nn.utils.rnn.pad_sequence([it['hand_timeline'] for it in items],batch_first=True)
     ordered_configuration.collate(items, out)
+    if any('hand_positions' in it for it in items):
+        from .hand_plan import collate
+        collate(items,out)
     from .local_writing import collate as collate_writing
     collate_writing(items,out)
     if any('musical_relation_extra_fraction' in item for item in items):

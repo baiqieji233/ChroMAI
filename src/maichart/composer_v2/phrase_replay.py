@@ -54,6 +54,8 @@ def training_item(dataset, song, configuration, begin, end, seed):
     if not item['token_weights'].any():
         return None
     item['layout_replay'] = (queries, rng.random(len(queries)).tolist())
+    if 'hand_timeline' in item:
+        item['hand_replay_clock']=song.clock
     for name in ('condition', 'condition_known'):
         item[name] = item[name].clone()
         item[name][1:] = 0
@@ -80,6 +82,8 @@ def collate(items, batch):
         local=[[mapping.get(tile, -1) for tile in row] for row in local],
         coordinates=coordinates,
     )
+    if 'hand_timeline' in batch:
+        batch['layout_replay']['hand_clocks']=[items[i]['hand_replay_clock'] for i in rows]
 
 
 @torch.no_grad()
@@ -91,11 +95,11 @@ def replace_keys(model, batch, cache):
     selected = torch.tensor(rows, device=device)
     probe = dict(batch, start_beat=[batch['start_beat'][i] for i in rows],
                  tile_ids_cpu=replay['tiles'], local_tile_ids_cpu=replay['local'])
-    for name in ('input_ids', 'token_beats', 'token_mask', 'reference_evidence',
+    for name in ('input_ids', 'token_beats', 'token_mask', 'reference_evidence', 'hand_timeline',
                  'paired_music_features', 'curve_left', 'curve_right', 'curve_mix', 'curve_override_queries'):
         if name in batch:
             probe[name] = batch[name][:, :width].index_select(0, selected)
-    for name in ('reference_trust', 'condition', 'condition_known'):
+    for name in ('reference_trust', 'condition', 'condition_known','mechanics_rows'):
         if name in batch:
             probe[name] = batch[name].index_select(0, selected)
 
@@ -119,4 +123,12 @@ def replace_keys(model, batch, cache):
     locations = selected[rows], positions + 1
     changed = (inputs[locations] != revised).sum()
     inputs[locations] = revised
-    return dict(batch, input_ids=inputs, layout_replay_changed=changed)
+    result=dict(batch, input_ids=inputs, layout_replay_changed=changed)
+    if 'hand_clocks' in replay:
+        from .hand_timeline import Timeline
+        timeline=batch['hand_timeline'].clone()
+        actual=inputs.index_select(0,selected).cpu().tolist()
+        for i,ids,clock in zip(replay['rows'],actual,replay['hand_clocks'],strict=True):
+            timeline[i]=torch.from_numpy(Timeline(model.codec,clock).extend(ids)).to(device)
+        result['hand_timeline']=timeline
+    return result

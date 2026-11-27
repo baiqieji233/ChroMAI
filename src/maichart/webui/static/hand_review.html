@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>手顺预览 · ChroMAI</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,"Microsoft YaHei",sans-serif;color:#edf1f7;background:#111820}
+*{box-sizing:border-box}body{margin:0 auto;max-width:1520px;padding:clamp(12px,2vw,26px)}
+h1{font-size:clamp(22px,3vw,36px);margin:0 0 .5em}h2{font-size:17px;margin:0 0 .5em}
+main{max-width: min(100%, 76vh);margin-inline:auto}
+section,.controls{background:#1b2632;border:1px solid #394655;border-radius:10px;padding:12px}
+#player{width:100%;min-height:200px}#player iframe{width:100%}#player>div{margin:auto}
+.row{display:flex;align-items:center;flex-wrap:wrap;gap:.65em}.controls{margin:12px 0}
+canvas{width:100%;display:block;aspect-ratio:1}p{margin:.5em 0;line-height:1.5;color:#b9c7d4}
+.left{color:#72c4ff}.right{color:#ffaa60}button,select{background:#27394a;border:1px solid #56687c;color:inherit;border-radius:5px;padding:.4em .65em;font:inherit}button{cursor:pointer}button:disabled{color:#86919c;cursor:default}
+#seek{width:100%;accent-color:#70b9f2}#notes{font-family:ui-monospace,monospace;display:flex;gap:.6em;align-items:center;overflow-x:auto}#notes strong{color:white;background:#32506b;border-radius:4px;padding:2px 5px}#run{white-space:pre-wrap;overflow-wrap:anywhere}#time{font-variant-numeric:tabular-nums}small{color:#bac6d4}a{color:#88c5ff}
+@media(max-width:820px){main{max-width:100%}}
+</style>
+<h1 id="title"></h1>
+<main><section><div class="row"><select id="variant" aria-label="手顺方案"></select><button id="diff" disabled>下一处分歧</button>
+<label><input id="showHands" type="checkbox" checked>显示手顺</label><b class="left">左手</b><b class="right">右手</b></div>
+<div id="player"></div><p role="status" id="status">正在加载 MiaView Web…</p><code id="run" hidden></code></section></main>
+<div class="controls"><div class="row"><button id="play" disabled>播放</button><button id="prev" disabled>上一组</button><button id="next" disabled>下一组</button><button id="back" disabled>−0.1 秒</button><button id="forward" disabled>+0.1 秒</button><output id="time"></output></div>
+<input id="seek" type="range" step=".001" disabled aria-label="歌曲时间"><p id="notes" aria-label="同步原谱"></p></div>
+<section><h2>当前接触组</h2><p id="detail"></p><small>左右倾向来自整段路径的代价差；搜索只剩一侧时显示「概率未知」。</small>
+<div id="model" hidden><h2>模型落笔时的预测</h2><p id="modelDetail"></p></div></section>
+<script type="application/json" id="data">HAND_REVIEW_PAYLOAD</script>
+<script type="module">
+const $=id=>document.getElementById(id);
+const data=JSON.parse($('data').textContent),solutions=data.solutions,groups=data.source?.events||[];
+const forecasts=data.model_events||[], names={button:'外键',touch:'Touch',hold:'Hold',slide:'Slide',wifi:'WiFi',touch_hold:'Touch Hold'};
+HAND_REVIEW_OVERLAY
+let overlay=null;
+let player=null,ready=false,playing=false,position=data.start,timer=0,animation=0,clockStamp=0,alive=true,lastNote=-2,lastDetail='',lastForecast=-2,transport=0;
+$('title').textContent=data.title+' · 手顺预览';$('model').hidden=!Array.isArray(data.model_events);
+$('seek').min=data.start;$('seek').max=data.stop;
+solutions.forEach((solution,i)=>$('variant').add(new Option(solution.title || (i?'ChroMAI 备选 '+i:'ChroMAI 首选'),i)));
+function fmt(s){return Math.floor(s/60)+':'+(s%60).toFixed(2).padStart(5,'0')}
+function at(rows,t){let l=0,h=rows.length;while(l<h){const i=(l+h)>>1;if(rows[i].second<=t+1e-7)l=i+1;else h=i}return l-1}
+function draw(){
+  const variant=Number($('variant').value)||0,frames=solutions[variant]?.frames||[],k=at(frames,position);
+  overlay?.draw(solutions[variant],position,{visible:$('showHands').checked});$('seek').value=position;$('time').textContent=fmt(position)+' / '+fmt(data.stop);
+  const i=at(groups,position);if(i!==lastNote){lastNote=i;const nodes=[];
+    for(let j=Math.max(0,i-2);j<Math.min(groups.length,i+4);j++){const n=document.createElement(j===i?'strong':'span');n.textContent=groups[j].notes;nodes.push(n)}$('notes').replaceChildren(...nodes)}
+  const key=variant+':'+k;if(key!==lastDetail){lastDetail=key;const f=frames[k];
+    $('detail').textContent=f?fmt(f.second)+'　'+[...f.left,...f.right].map(h=>(h.star_head?'星头':names[h.kind]||h.kind)+(h.pad||h.lane||'')+'　'+
+      (Number.isFinite(h.p_left)?'左 '+Math.round(h.p_left*100)+'% / 右 '+Math.round(h.p_right*100)+'%':'概率未知')).join('　·　'):'等待乐句开始';}
+  const m=at(forecasts,position);if(lastForecast!==m){lastForecast=m;const e=forecasts[m];
+    $('modelDetail').textContent=e?fmt(e.second)+'　'+e.notes+'　'+(e.origin==='repair_replay'?'修复后重算　':'')+e.prediction.contacts.map(h=>h.contact+'　'+
+      (Number.isFinite(h.p_left)?'左 '+Math.round(100*h.p_left)+'% / 右 '+Math.round(100*h.p_right)+'%'+(h.assignment?'':'（未定手）'):'缺少该写法的左右手依据')).join('　·　'):'所选时刻尚无预测。';}
+}
+function animate(now){
+  if(!alive)return;
+  if(playing && clockStamp) {
+    position=Math.min(data.stop,position+Math.max(0,now-clockStamp)/1000);
+    draw();
+  }
+  clockStamp=now;
+  animation=requestAnimationFrame(animate);
+}
+function status(message){$('status').textContent=message}
+function enabled(value){for(const id of ['play','prev','next','back','forward','seek'])$(id).disabled=!value;
+  $('diff').disabled=!value||solutions.length<2}
+async function move(t){if(!ready)return;const id=++transport;const s=Math.max(data.start,Math.min(data.stop,t));
+  playing=false;
+  await player.pause();if(id!==transport)return;await player.seek(s);if(id!==transport)return;
+  playing=false;position=s;$('play').textContent='播放';draw();}
+async function sync(){if(!alive||!ready)return;
+  const id=transport;
+  try{const state=await player.getState();if(id!==transport)return;
+    position=Number(state.currentTime)||0;clockStamp=performance.now();playing=Boolean(state.playing);$('play').textContent=playing?'暂停':'播放';
+    if(position<data.start-.06 || position>data.stop+.025){await move(Math.min(data.stop,Math.max(data.start,position)))}
+    else draw();
+  }catch(e){if(alive)status('播放器状态读取失败：'+e.message)}
+  finally{if(alive)timer=setTimeout(sync,playing?48:130)}
+}
+function safe(fn){return (...args)=>Promise.resolve(fn(...args)).catch(e=>status(e.message))}
+$('play').onclick=safe(async()=>{if(!ready)return;++transport;
+  if(playing)await player.pause();else{if(position>=data.stop-.06)await player.seek(data.start);await player.play()}});
+function jump(direction){const i=direction>0?at(groups,position+.0001)+1:at(groups,position-.0002);if(groups[i])return move(groups[i].second)}
+$('prev').onclick=safe(()=>jump(-1));$('next').onclick=safe(()=>jump(1));
+$('back').onclick=safe(()=>move(position-.1));$('forward').onclick=safe(()=>move(position+.1));
+$('seek').onchange=safe(()=>move(Number($('seek').value)));$('variant').onchange=draw;
+$('showHands').onchange=draw;
+function assignment(frame){return frame?.left.map(h=>[h.x,h.y,h.kind,h.job].join('/')).sort().join('|')}
+$('diff').onclick=safe(()=>{const fs=solutions[0].frames,other=solutions[Math.max(1,Number($('variant').value))].frames;
+  const times=fs.filter((f,i)=>assignment(f)!==assignment(other[i])).map(f=>f.second);
+  if(times.length){if($('variant').value==='0')$('variant').value=1;return move(times.find(v=>v>position+.06)??times[0])}});
+document.addEventListener('keydown',e=>{if(!ready || ['INPUT','SELECT','BUTTON','IFRAME'].includes(e.target.tagName))return;
+ if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();safe(jump)(e.key==='ArrowLeft'?-1:1)}
+ if(e.code==='Space'){e.preventDefault();$('play').click()}});
+window.addEventListener('pagehide',()=>{alive=false;clearTimeout(timer);cancelAnimationFrame(animation);if(player)player.destroy()},{once:true});
+async function init(){
+ draw();
+ if(location.protocol==='file:'){status('请用本机预览服务打开，MiaView_Web 需要 HTTP 地址。');$('run').hidden=!data.serve_command;$('run').textContent=data.serve_command||'';return;}
+ const response=await fetch('/api/preview/status');if(!response.ok)throw new Error('当前地址未提供 MiaView_Web 服务。');
+ const runtime=await response.json();if(!runtime.available)throw new Error('请先在 WebUI 的成谱预览中安装 MiaView_Web，再刷新本页。');
+ const sdk=await import(runtime.sdk_url);
+ player=sdk.createPreview($('player'),{rendererUrl:runtime.renderer_url,resolution:{width:720,height:720},maxFps:'unlimited',theme:'dark',diagnostics:false});
+ player.on('error',e=>status('MiaView_Web：'+e.message));await player.ready;
+ overlay=mountHandOverlay($('player').querySelector('iframe'));
+ const input={maidata:data.chart_url?{url:data.chart_url}:data.chart_text,difficulty:data.slot};
+ if(data.audio)input.audio=data.audio;
+ const info=await player.load(input);await player.seek(data.start);ready=true;enabled(true);
+ status((info.title||data.title)+' · '+(info.noteCount??'—')+' 个音符'+(data.audio?'':' · 静音')+(data.unknown?' · '+data.unknown+' 项动作待核对':''));
+ animation=requestAnimationFrame(animate);
+ await sync();
+}
+init().catch(e=>status('预览加载失败：'+e.message));
+</script></html>

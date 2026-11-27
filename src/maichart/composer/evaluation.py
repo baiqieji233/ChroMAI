@@ -157,7 +157,18 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None
         raise ValueError('at least three independent song/audio groups are required')
     ordered = sorted(groups.values(), key=lambda g: sorted(identities[i]['audio_sha256'] for i in g))
     random.Random(seed).shuffle(ordered)
-    holdout_count = min(len(ordered) - 1, max(2, round(len(ordered) * fraction)))
+    full_difficulties = [[d for d in song.get('difficulties', ())
+                          if d.get('learning_role', song.get('learning_role', 'full')) != 'mechanics']
+                         for song in songs]
+    has_roles = any(len(keep) != len(song.get('difficulties', ())) for keep, song in zip(full_difficulties, songs))
+    eligible_groups = len(ordered)
+    if has_roles:
+        full = [g for g in ordered if any(full_difficulties[i] for i in g)]
+        if len(full) < 3:
+            raise ValueError('自动划分需要至少三组独立录音含「完整学习」谱面；也可以指定独立验证清单。')
+        ordered = full + [g for g in ordered if not any(full_difficulties[i] for i in g)]
+        eligible_groups = len(full)
+    holdout_count = min(eligible_groups - 1, max(2, round(eligible_groups * fraction)))
     dev_count = holdout_count // 2
     assignments = {'dev': ordered[:dev_count], 'final': ordered[dev_count:holdout_count],
                    'train': ordered[holdout_count:]}
@@ -165,17 +176,20 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None
     report = {'schema': 'composer-song-audio-split-v1', 'source_manifest': str(source),
               'source_sha256': file_hash(source), 'requested_total_holdout_fraction': fraction, 'seed': seed,
               'group_count': len(groups), 'actual_total_holdout_group_fraction': holdout_count / len(groups),
-              'actual_total_holdout_song_fraction': sum(len(g) for g in ordered[:holdout_count]) / len(songs),
               'splits': {}}
     if eligibility_report is not None: report['chart_eligibility'] = eligibility_report
     for name, selected in assignments.items():
         indices = sorted(i for g in selected for i in g)
+        if has_roles and name != 'train':
+            indices = [i for i in indices if full_difficulties[i]]
         output = dict(data)
         # Relative paths resolve exactly as they did at the original location.
         output['source_root'] = str(_source_root(source, data))
         output['songs'] = []
         for i in indices:
             entry = dict(songs[i])
+            if has_roles and name != 'train':
+                entry['difficulties'] = full_difficulties[i]
             for key in ('audio_path', 'maidata_path'):
                 if entry.get(key):
                     entry[key] = str(_source_asset(entry[key], source, data))
@@ -195,6 +209,9 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None
             'groups': len(selected), 'songs': len(indices),
             'group_fraction': len(selected) / len(groups), 'song_fraction': len(indices) / len(songs),
             'audio_sha256': sorted({identities[i]['audio_sha256'] for i in indices})}
+    report['actual_total_holdout_song_fraction'] = sum(
+        report['splits'][name]['songs'] for name in ('dev','final')
+    ) / len(songs)
     report_path = out / 'split_report.json'
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     report['report_path'] = str(report_path)

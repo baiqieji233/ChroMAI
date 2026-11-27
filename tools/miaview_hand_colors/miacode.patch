@@ -1,0 +1,273 @@
+diff --git a/src/core/chart/model/TimelineData.h b/src/core/chart/model/TimelineData.h
+index 0dfca7d35e4940ec03f7bd6a4e442638e2d77aa2..38ba9fdf8c8f6712aa13d4d18c1765f4e007b0dc 100644
+--- a/src/core/chart/model/TimelineData.h
++++ b/src/core/chart/model/TimelineData.h
+@@ -5,4 +5,5 @@
+ #include <QStringList>
+ #include <QVector>
++#include <utility>
+
+ // Pad entry time along a slide or wifi track, as a proportion of the track.
+@@ -94,3 +95,8 @@ struct TimelineNoteMarker {
+     // * hsMultiplier. Default 1.0 = current/legacy behavior.
+     double hsMultiplier = 1.0;
++    int previewHandHead = 0;
++    int previewHandTrack = 0;
++    int previewHandTrackOther = 0;
++    int previewHandCenter = -1;
++    QVector<std::pair<double, int>> previewHandChanges;
+ };
+diff --git a/src/core/scene/PreviewHandTint.h b/src/core/scene/PreviewHandTint.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..fd12d17619dc0b725b209068f9979b0ff97f153d
+--- /dev/null
++++ b/src/core/scene/PreviewHandTint.h
+@@ -0,0 +1,79 @@
++#pragma once
++#include <QImage>
++#include <cmath>
++#include <map>
++#include <utility>
++#include "core/chart/model/TimelineData.h"
++
++namespace miacode::preview::scene {
++
++inline int handTrackColor(const TimelineNoteMarker& marker, double at)
++{
++    int tint = marker.previewHandTrack;
++    for (const auto& [second, side] : marker.previewHandChanges) {
++        if (second > at) break;
++        tint = side;
++    }
++    return tint;
++}
++
++inline int handSplitColor(int first, int second, qreal direction, bool vertical = false)
++{
++    if (first == second) return first;
++    if (direction < 0) std::swap(first, second);
++    // A 0 half preserves that half of the original texture.
++    return 3 + (vertical ? 9 : 0) + first * 3 + second;
++}
++
++inline int handWifiColor(const TimelineNoteMarker& marker, qreal degrees)
++{
++    if (marker.wifiLanePoints.size() < 2 || marker.wifiLanePoints.first().isEmpty()
++        || marker.wifiLanePoints.last().isEmpty())
++        return 0;
++    const QPointF span = marker.wifiLanePoints.last().last() - marker.wifiLanePoints.first().last();
++    const qreal phi = degrees * 0.017453292519943295;
++    const qreal x = std::cos(phi), y = std::sin(phi);
++    const qreal horizontal = span.x() * x + span.y() * y;
++    const qreal vertical = span.y() * x - span.x() * y;
++    if (std::abs(horizontal) >= std::abs(vertical))
++        return handSplitColor(marker.previewHandTrack, marker.previewHandTrackOther, horizontal);
++    return handSplitColor(marker.previewHandTrack, marker.previewHandTrackOther, vertical, true);
++}
++
++inline const QImage* handTintImage(const QImage* source, int tint)
++{
++    if (!source || source->isNull() || tint <= 0 || tint >= 21) return source;
++    // Only static skin assets or the existing cached EX composites reach this cache.
++    // std::map keeps texture pointers stable as additional assets are first used.
++    static std::map<std::pair<qint64, int>, QImage> images;
++    const auto key = std::make_pair(source->cacheKey(), tint);
++    auto found = images.find(key);
++    if (found != images.end()) return &found->second;
++    QImage image = source->convertToFormat(QImage::Format_ARGB32);
++    const QRgb colors[] = {qRgb(60, 167, 255), qRgb(255, 141, 51)};
++    for (int y = 0; y < image.height(); ++y) {
++        auto* row = reinterpret_cast<QRgb*>(image.scanLine(y));
++        for (int x = 0; x < image.width(); ++x) {
++            const QRgb pixel = row[x];
++            if (!qAlpha(pixel)) continue;
++            int side = tint;
++            if (tint >= 3) {
++                const int halves = (tint - 3) % 9;
++                const bool second = tint >= 12 ? 2 * y >= image.height() : 2 * x >= image.width();
++                side = second ? halves % 3 : halves / 3;
++            }
++            if (!side) continue;
++            const QRgb color = colors[side - 1];
++            const int value = qMax(qRed(pixel), qMax(qGreen(pixel), qBlue(pixel)));
++            const int light = qBound(0, (qMin(qRed(pixel), qMin(qGreen(pixel), qBlue(pixel))) - 180) * 65 / 75, 65);
++            const auto channel = [value, light](int c) {
++                return (c * value + (255 - c) * light * value / 255) / 255;
++            };
++            row[x] = qRgba(channel(qRed(color)), channel(qGreen(color)), channel(qBlue(color)), qAlpha(pixel));
++        }
++    }
++    auto saved = images.emplace(key, image.convertToFormat(QImage::Format_ARGB32_Premultiplied));
++    return &saved.first->second;
++}
++
++}
+diff --git a/src/core/scene/PreviewHeadLayerState.cpp b/src/core/scene/PreviewHeadLayerState.cpp
+index a49b685a0dec739cf50e29847ed8b43dd6ce33c9..d61e1f164ece52dd1ed699866aa27de7aa56d11d 100644
+--- a/src/core/scene/PreviewHeadLayerState.cpp
++++ b/src/core/scene/PreviewHeadLayerState.cpp
+@@ -1,2 +1,3 @@
++#include "core/scene/PreviewHandTint.h"
+ #include "core/scene/PreviewHeadLayerState.h"
+
+@@ -420,4 +421,6 @@ PreviewHeadLayerState buildPreviewHeadLayerState(
+             }
+
++            if (renderHoldImageCacheable && !marker.isMine)
++                renderHoldImage = handTintImage(renderHoldImage, marker.previewHandHead);
+             const auto appendHoldStripSlices = [&](const QPointF& center, int bodyLogicalLength, qreal scale) {
+                 const int srcW = qMax(1, renderHoldImage->width());
+@@ -620,5 +623,5 @@ PreviewHeadLayerState buildPreviewHeadLayerState(
+         appendSprite(
+             &layerState,
+-            headImage,
++            handTintImage(headImage, headImageCacheable && !headIsMine ? marker.previewHandHead : 0),
+             point,
+             targetWidth,
+diff --git a/src/core/scene/PreviewSlideMotionLayerState.cpp b/src/core/scene/PreviewSlideMotionLayerState.cpp
+index 445654b49f97c87b2079e7743791bc77a9bfbca4..2e7848d6fd893815fc63ee25e059417796d7a9a6 100644
+--- a/src/core/scene/PreviewSlideMotionLayerState.cpp
++++ b/src/core/scene/PreviewSlideMotionLayerState.cpp
+@@ -1,2 +1,3 @@
++#include "core/scene/PreviewHandTint.h"
+ #include "core/scene/PreviewSlideMotionLayerState.h"
+
+@@ -203,5 +204,5 @@ PreviewSlideMotionLayerState buildPreviewSlideMotionLayerState(
+
+             appendSprite(
+-                renderImage,
++                handTintImage(renderImage, marker.trackMine ? 0 : handTrackColor(marker, state.playheadSeconds)),
+                 logicalPoint,
+                 mirroredStarAngleDegrees(angle),
+@@ -256,6 +257,10 @@ PreviewSlideMotionLayerState buildPreviewSlideMotionLayerState(
+                 ? (angles.isEmpty() ? 0.0 : angles.constFirst())
+                 : interpolateAngle(angles, proportion);
++            const int tint = laneIndex == 0 ? marker.previewHandTrack
++                : laneIndex + 1 == marker.wifiLanePoints.size() ? marker.previewHandTrackOther
++                 : marker.previewHandCenter >= 0 ? marker.previewHandCenter
++                : handWifiColor(marker, mirroredStarAngleDegrees(angle));
+             appendSprite(
+-                renderImage,
++                handTintImage(renderImage, marker.trackMine ? 0 : tint),
+                 logicalPoint,
+                 mirroredStarAngleDegrees(angle),
+diff --git a/src/core/scene/PreviewTouchHoldLayerState.cpp b/src/core/scene/PreviewTouchHoldLayerState.cpp
+index bfd94b8f0847e96636e265d4cb7ca8ec689491b6..75376fc1897184ef4b56488ef12ff5fce1bd222a 100644
+--- a/src/core/scene/PreviewTouchHoldLayerState.cpp
++++ b/src/core/scene/PreviewTouchHoldLayerState.cpp
+@@ -1,2 +1,3 @@
++#include "core/scene/PreviewHandTint.h"
+ #include "core/scene/PreviewTouchHoldLayerState.h"
+
+@@ -125,4 +126,5 @@ PreviewTouchHoldLayerState buildPreviewTouchHoldLayerState(
+         }
+
++        const int hand = marker.isMine ? 0 : marker.previewHandHead;
+         const QImage* renderFan0 = &fan0Base;
+         const QImage* renderFan1 = &fan1Base;
+@@ -177,5 +179,5 @@ PreviewTouchHoldLayerState buildPreviewTouchHoldLayerState(
+             appendToBucket(
+                 fanBuckets[bucketIndex],
+-                pieceLayout.image,
++                handTintImage(pieceLayout.image, hand),
+                 QPointF(point.x() + pieceLayout.dx, point.y() + pieceLayout.dy),
+                 qMax<qreal>(1.0, qRound(pieceLayout.image->width() * kTouchAssetScale * canvasScale)),
+@@ -187,5 +189,5 @@ PreviewTouchHoldLayerState buildPreviewTouchHoldLayerState(
+             );
+         }
+-        appendToBucket(pointBucket, &pointBase, point, pointWidth, pointHeight, 0.0, alpha);
++        appendToBucket(pointBucket, handTintImage(&pointBase, hand), point, pointWidth, pointHeight, 0.0, alpha);
+
+         if (deltaSeconds >= 0.0 && !borderBase.isNull()) {
+@@ -193,5 +195,5 @@ PreviewTouchHoldLayerState buildPreviewTouchHoldLayerState(
+             if (progress > 0.0) {
+                 PreviewArcDescriptor arc;
+-                arc.image = &borderBase;
++                arc.image = handTintImage(&borderBase, hand);
+                 arc.center = point;
+                 arc.width = borderWidth;
+diff --git a/src/core/scene/PreviewTouchLayerState.cpp b/src/core/scene/PreviewTouchLayerState.cpp
+index 0b16f288c46ff15a37c9d9373b8ec2d86cfd5350..8c49f94090d3644f739a4e00dc7dc4cb9b9a3cd2 100644
+--- a/src/core/scene/PreviewTouchLayerState.cpp
++++ b/src/core/scene/PreviewTouchLayerState.cpp
+@@ -1,2 +1,3 @@
++#include "core/scene/PreviewHandTint.h"
+ #include "core/scene/PreviewTouchLayerState.h"
+
+@@ -103,5 +104,6 @@ PreviewTouchLayerState buildPreviewTouchLayerState(
+             continue;
+         }
+-        const QImage* cornerImage = &baseCornerImage;
++        const int hand = marker.isMine ? 0 : marker.previewHandHead;
++        const QImage* cornerImage = handTintImage(&baseCornerImage, hand);
+         const PreviewAnimatedSpriteEffect cornerEffect = marker.isBreak
+             ? PreviewAnimatedSpriteEffect::BreakAnimate
+@@ -166,5 +168,5 @@ PreviewTouchLayerState buildPreviewTouchLayerState(
+             if (secondBorder2 != nullptr && !secondBorder2->isNull()) {
+                 appendSprite(
+-                    secondBorder2,
++                    handTintImage(secondBorder2, secondMarker.isMine ? 0 : secondMarker.previewHandHead),
+                     point,
+                     qMax<qreal>(1.0, qRound(secondBorder2->width() * kTouchAssetScale * canvasScale)),
+@@ -185,5 +187,5 @@ PreviewTouchLayerState buildPreviewTouchLayerState(
+                 if (thirdBorder3 != nullptr && !thirdBorder3->isNull()) {
+                     appendSprite(
+-                        thirdBorder3,
++                        handTintImage(thirdBorder3, thirdMarker.isMine ? 0 : thirdMarker.previewHandHead),
+                         point,
+                         qMax<qreal>(1.0, qRound(thirdBorder3->width() * kTouchAssetScale * canvasScale)),
+@@ -195,5 +197,5 @@ PreviewTouchLayerState buildPreviewTouchLayerState(
+             }
+         }
+-        appendSprite(&basePointImage, point, pointWidth, pointHeight, 0.0, alpha);
++        appendSprite(handTintImage(&basePointImage, hand), point, pointWidth, pointHeight, 0.0, alpha);
+     }
+
+diff --git a/src/core/scene/PreviewTrackLayerState.cpp b/src/core/scene/PreviewTrackLayerState.cpp
+index e9eb7eb31d4e899c794f3bc0b8b6edabe20c7698..e80dc123ba66dec43ea57606cc0b57ad01bb6b3d 100644
+--- a/src/core/scene/PreviewTrackLayerState.cpp
++++ b/src/core/scene/PreviewTrackLayerState.cpp
+@@ -1,2 +1,3 @@
++#include "core/scene/PreviewHandTint.h"
+ #include "core/scene/PreviewTrackLayerState.h"
+
+@@ -12,4 +13,5 @@
+
+ #include <algorithm>
++#include <limits>
+
+ namespace {
+@@ -205,5 +207,23 @@ PreviewTrackLayerState buildPreviewTrackLayerState(
+         const int endPointIndex = trimFromTail ? points.size() - clampedCut : points.size();
+         for (int pointIndex = startPointIndex; pointIndex < endPointIndex; ++pointIndex) {
+-            appendSprite(image, points[pointIndex], -rotations.value(pointIndex), opacity, effect, cacheable);
++            int hand = marker.trackMine ? 0 : marker.previewHandTrack;
++            if (hand && !marker.previewHandChanges.isEmpty()) {
++                const auto& route = marker.slideSegmentPoints.value(segmentIndex);
++                int best = 0;
++                qreal bestDistance = std::numeric_limits<qreal>::infinity();
++                for (int j = 0; j < route.size(); ++j) {
++                    const QPointF offset = points[pointIndex] - route[j];
++                    const qreal distance = QPointF::dotProduct(offset, offset);
++                    if (distance < bestDistance) {
++                        best = j;
++                        bestDistance = distance;
++                    }
++                }
++                const double fraction = route.size() > 1 ? double(best) / (route.size() - 1) : 0.0;
++                hand = handTrackColor(marker, marker.slideSegmentShootSeconds.value(segmentIndex, marker.slideTraceSecond)
++                    + fraction * marker.slideSegmentDurations.value(segmentIndex, marker.endSecond - marker.slideTraceSecond));
++            }
++            appendSprite(handTintImage(image, cacheable ? hand : 0), points[pointIndex],
++                -rotations.value(pointIndex), opacity, effect, cacheable);
+         }
+     };
+@@ -236,5 +256,7 @@ PreviewTrackLayerState buildPreviewTrackLayerState(
+             }
+
+-            appendSprite(baseImage, points[pointIndex], -rotations.value(pointIndex), opacity, effect, true);
++            const qreal angle = -rotations.value(pointIndex);
++            const int hand = marker.trackMine ? 0 : handWifiColor(marker, angle);
++            appendSprite(handTintImage(baseImage, hand), points[pointIndex], angle, opacity, effect, true);
+         }
+     };

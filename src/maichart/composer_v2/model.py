@@ -40,7 +40,11 @@ class ComposerV2Config:
     future_configuration_weight: float = .05
     spatial_policy: str = 'off'
     intent_policy: str = 'off'
+    hand_plan_policy: str = 'off'
     def __post_init__(self):
+        from .hand_plan import CHOICES as HAND_PLANS
+        if self.hand_plan_policy not in HAND_PLANS[1:] or (self.hand_plan_policy!='off' and self.sequence_policy!='continuous_events_v1'):
+            raise ValueError('手顺预判需要连续事件模型及有效策略')
         from .intent_policy import POLICY as INTENT_POLICY
         if self.intent_policy not in ('off', INTENT_POLICY):
             raise ValueError('Unknown phrase intent policy')
@@ -422,6 +426,13 @@ class ComposerV2(nn.Module):
             code=torch.zeros(codec.vocab_size,dtype=torch.long)
             for value,name in ((1,'carry_id'),(2,'ctx_id'),(3,'ref_id'),(4,'tgt_id')):code[getattr(codec,name)]=value
             self.register_buffer('segment_code',code,persistent=False)
+        if c.hand_plan_policy != 'off':
+            from .hand_plan import HandPlan
+            with torch.random.fork_rng(devices=[]):
+                self.hand_plan = HandPlan(codec,d)
+                from . import hand_memory
+                if c.hand_plan_policy in hand_memory.POLICIES:
+                    self.hand_memory = hand_memory.HandMemory(d,self.hand_plan.execute.out_features)
         if c.intent_policy != 'off':
             from .intent import PhraseIntent
             with torch.random.fork_rng(devices=[]):
@@ -643,6 +654,28 @@ class ComposerV2(nn.Module):
             role_values=torch.cat((probabilities[:,:,:3]*self.writing_time_tokens[value][...,None],
                                    probabilities[:,:,3:]*self.writing_query_tokens[value][...,None]),dim=-1)
             normalized=normalized+self.local_writing.execute_successor(role_values.to(normalized.dtype))
+        hand_bias=None
+        if hasattr(self,'hand_plan'):
+            hand_state=state.setdefault('hand',{}) if use_cache else None
+            hand_bias,planned,observed=self.hand_plan(normalized,value,start,hand_state,batch.get('mechanics_rows'),
+                                                        batch['token_mask'][:,start:])
+            if 'hand_positions' in batch and not use_cache:
+                cache['hand_prediction']=(planned,observed)
+            if hasattr(self,'hand_memory'):
+                from .hand_memory import FEEDBACK
+                timeline=batch.get('hand_timeline')
+                offset=int(batch.get('hand_timeline_start',0))
+                rows=timeline[:,start-offset:] if timeline is not None else None
+                memory_state=state.setdefault('hand_memory',{}) if use_cache else None
+                post,extra=self.hand_memory(normalized,rows,start,memory_state,batch.get('mechanics_rows'),
+                    self.config.hand_plan_policy==FEEDBACK and batch.get('use_hand_feedback',True))
+                if extra is not None:
+                    # Query and vocabulary restriction match the existing N:/P: channel.
+                    target=(hand_state['region'][:,start:length].eq(3) if use_cache
+                            else ids.eq(self.codec.tgt_id).cumsum(1)>0)
+                    hand_bias=hand_bias+extra*(target & self.hand_plan.layout_query[value])[...,None]
+                if 'memory_positions' in batch and not use_cache:
+                    cache['memory_readout']=post
         intent_plan = cache.get('intent_plan')
         if batch.get('intent_mode') == 'off' or batch.get('intent_strength', 1.) == 0.:
             intent_plan = None
@@ -653,6 +686,8 @@ class ComposerV2(nn.Module):
             queried=normalized[button_queries]
             logits=F.linear(queried,weight.index_select(0,self.rim_button_ids),
                             self.output_bias.index_select(0,self.rim_button_ids))
+            if hand_bias is not None:
+                logits=logits+hand_bias[button_queries].index_select(-1,self.hand_plan.buttons).to(logits.dtype)
             if rim_features is not None:
                 logits=logits+self.spatial_history.rim_bias(queried,rim_features[button_queries]).to(logits.dtype)
             if intent_plan is not None and intent_plan.strength > 0.:
@@ -664,6 +699,8 @@ class ComposerV2(nn.Module):
                 logits = logits + adjusted
             return logits
         logits=F.linear(normalized,weight,self.output_bias)
+        if hand_bias is not None:
+            logits.index_add_(-1,self.hand_plan.ids,hand_bias.index_select(-1,self.hand_plan.columns).to(logits.dtype))
         if rim_features is not None:
             rim_bias=self.spatial_history.rim_bias(normalized,rim_features).to(logits.dtype)
             logits.index_add_(-1,self.rim_button_ids,rim_bias)
@@ -712,6 +749,10 @@ class ComposerV2(nn.Module):
             logits,future['decision_logits']=self.decode(batch,cache,incremental=False,
                                                         decision_positions=batch['decision_positions'])
         else:logits=self.decode(batch,cache,incremental=False)
+        if 'hand_prediction' in cache:
+            future['hand_prediction']=cache.pop('hand_prediction')
+        if 'memory_readout' in cache:
+            future['memory_readout']=cache.pop('memory_readout')
         if hasattr(self,'local_writing'):
             future['future_configuration_logits']=cache['writing_logits']
             if 'slide_geometry_logits' in cache:
@@ -784,4 +825,19 @@ class ComposerV2(nn.Module):
         if geometry_loss is not None:
             metrics['slide_geometry_loss'] = geometry_loss.detach()
         metrics.update({name: value.detach() for name, value in intent_metrics.items()})
+        if 'hand_prediction' in output:
+            from .hand_plan import supervision,AUX_WEIGHT
+            hand_sum,hand_mass=supervision(*output['hand_prediction'],batch)
+            if 'memory_readout' in output:
+                from .hand_memory import supervision as memory_supervision
+                memory_sum,memory_mass,stats=memory_supervision(output['memory_readout'],batch,by_recording=not self.training)
+                hand_sum=hand_sum+memory_sum
+                hand_mass=hand_mass+memory_mass
+                metrics.update(hand_memory_sum=memory_sum.detach(),hand_memory_mass=memory_mass.detach())
+                if stats is not None:
+                    metrics['hand_memory_evidence']=stats
+            main_mass=weights.sum()
+            total=(main_mass+batch.get('mechanics_mass',0.)).clamp_min(1.)
+            objective=(objective*main_mass+AUX_WEIGHT*hand_sum)/total
+            metrics.update(loss=objective.detach(),hand_plan_sum=hand_sum.detach(),hand_plan_mass=hand_mass.detach())
         return objective,metrics

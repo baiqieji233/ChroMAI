@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from maichart.portable_paths import material_path
 from maichart.composer_v2 import intent_policy, spatial_policy
+from maichart.composer_v2 import hand_plan
 from .composer_api import _path, _int, _float, _arg
 
 FAMILY = "chart_composer_v2"
@@ -44,6 +45,8 @@ def inspect(handler,payload):
     if result.get('can_resume'):
         try:
             _, manifest_data = _saved_manifest(result.get('args') or {})
+            if 'mechanics_manifests' in manifest_data:
+                result['mechanics_manifests'] = _manifest_paths(manifest_data['mechanics_manifests'])
             if 'auto_quality_manifests' in manifest_data:
                 result['auto_quality_manifests'] = _manifest_paths(manifest_data['auto_quality_manifests'])
         except (OSError, ValueError):
@@ -109,11 +112,15 @@ def _prepare_scoped_resume(payload, saved, *, policy=None):
     scope = _requested_auto_quality_scope(payload, policy=policy)
     effective, data = _saved_manifest(saved)
     frozen_scope = _manifest_paths(data.get('auto_quality_manifests'))
-    if frozen_scope is None and scope is None:
+    roles = _manifest_paths(payload.get('mechanics_manifests'))
+    frozen_roles = _manifest_paths(data.get('mechanics_manifests')) or []
+    if roles is not None and set(roles) != set(frozen_roles):
+        raise ValueError('续训会沿用各来源的学习用途。更改用途请在新目录微调。')
+    if frozen_scope is None and scope is None and not frozen_roles:
         return None
     checked_sources = _manifest_paths(payload.get('manifests')) or []
     # Selecting all sources is the same composition as legacy automatic adoption.
-    if frozen_scope is None and checked_sources and set(scope) == set(checked_sources):
+    if frozen_scope is None and checked_sources and scope is not None and set(scope) == set(checked_sources) and not frozen_roles:
         return None
     if scope is not None and (frozen_scope is None or set(scope) != set(frozen_scope)):
         raise ValueError('续训必须沿用检查点的正式体检来源。要调整勾选，请在新目录微调。')
@@ -139,6 +146,8 @@ def _prepare_scoped_resume(payload, saved, *, policy=None):
                 'cache_dir': payload.get('cache_dir') or (str(material_path(saved_cache)) if saved_cache else None)}
     selection = dict(manifest=str(origin), merged_from=source_paths, auto_quality_manifests=frozen_scope,
                      summary=data.get('source_manifest_summary', data.get('summary', {})))
+    if frozen_roles:
+        selection['mechanics_manifests'] = frozen_roles
     return prepared, selection
 
 
@@ -211,6 +220,8 @@ def _estimate_model(payload, mode):
     scope = 'all'
     backbone = {}
     if mode != 'generate':
+        hand = hand_plan.resolve(payload.get('hand_plan_policy','auto'), saved=saved, resume=mode=='resume')
+        config = replace(config, hand_plan_policy=hand)
         intent = intent_policy.resolve(_choice(payload, 'intent_policy', 'auto', intent_policy.CHOICES),
                                       saved=saved, resume=mode == 'resume', sequence=config.sequence_policy)
         contract = payload.get('training_contract')
@@ -409,6 +420,10 @@ def start_train(handler,payload,*,runtime):
             if key in fixed and not (key=="audio_layers" and mode=="finetune" and payload.get(key) is not None):payload[key]=fixed[key]
         payload['refresh_events']=fixed.get('refresh_events',16)
     sequence_policy = 'continuous_events_v1' if mode == 'fresh' else fixed.get('sequence_policy', 'window_v1')
+    hand = hand_plan.resolve(payload.get('hand_plan_policy','auto'), saved=fixed if parent else None,
+                             resume=mode=='resume')
+    if hand != 'off' and sequence_policy != 'continuous_events_v1':
+        raise ValueError('下一组动作预判需要连续事件模型')
     intent_requested = _choice(payload, 'intent_policy', 'auto', intent_policy.CHOICES)
     intent = intent_policy.resolve(intent_requested, saved=fixed if parent else None,
                                    resume=mode == 'resume', sequence=sequence_policy)
@@ -417,6 +432,8 @@ def start_train(handler,payload,*,runtime):
     scope = resolve_finetune_scope(scope_requested, parent_contract, resume=mode == 'resume',
                                    initialized=mode == 'finetune', intent_policy=intent,
                                    previous_intent=fixed.get('intent_policy', 'off') if parent else 'off')
+    if scope == 'intent_only' and hand != (fixed or {}).get('hand_plan_policy','off'):
+        raise ValueError('要更改下一组动作预判，请将微调范围设为「全部参数」或「音乐读取连接」')
     backbone = intent_policy.fixed_backbone_options(payload, saved=fixed if parent else None,
                                                    scope=scope, resume=mode == 'resume')
     payload.update(backbone)
@@ -474,6 +491,21 @@ def start_train(handler,payload,*,runtime):
     _arg(args, '--musical-context-probability', musical_probability)
     settings = dict(musical_context=musical_context, musical_context_policy=musical_policy,
                     musical_context_probability=musical_probability)
+    if hand != 'off':
+        _arg(args, '--hand-plan-policy', hand)
+    elif payload.get('hand_plan_policy') == 'off':
+        _arg(args, '--hand-plan-policy', 'off')
+    settings['hand_plan_policy'] = hand
+    if hand in hand_plan.hand_memory.POLICIES:
+        if payload.get('hand_label_limit') is not None and mode!='resume':
+            settings['hand_label_limit']=_integer(payload,'hand_label_limit',128)
+            _arg(args,'--hand-label-limit',settings['hand_label_limit'])
+        if payload.get('hand_label_workers') is not None:
+            workers=_integer(payload,'hand_label_workers',4,minimum=1)
+            if workers>32:
+                raise ValueError('手顺缓存并行进程最多为 32')
+            settings['hand_label_workers']=workers
+            _arg(args,'--hand-label-workers',workers)
     _arg(args, "--musical-relation-policy", relation_requested)
     _arg(args, "--musical-relation-fraction", relation_fraction)
     _arg(args, "--future-configuration-policy", future_requested)
@@ -676,6 +708,10 @@ def start_train(handler,payload,*,runtime):
     # The child reads the full manifest from disk. Polling only needs the selection summary.
     selection_summary = {key: value for key, value in selection.items() if key != 'songs'} if selection else None
     settings.update(mode=mode,manifest=str(manifest),cache_dir=str(cache),dataset_selection=selection_summary)
+    if manifest_data.get('mechanics_manifests'):
+        if hand == 'off' or scope == 'intent_only':
+            raise ValueError('仅练动作的来源需要启用「下一组动作预判」，并使用可训练动作分支的微调范围')
+        settings['mechanics_manifests'] = manifest_data['mechanics_manifests']
     if 'auto_quality_manifests' in manifest_data:
         effective_data = manifest_data if manifest == source_manifest else json.loads(manifest.read_text(encoding='utf-8-sig'))
         adopted = resolve_auto_quality_policy(auto_quality,manifest,checked.get('training_contract') if parent else None,

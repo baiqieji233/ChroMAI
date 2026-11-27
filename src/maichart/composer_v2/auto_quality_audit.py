@@ -16,8 +16,8 @@ Two-tier annotation priority:
 
 2. **Priority 2 — Strict Multi-Gate Worthy Phrase Highlighting (``label="good"``)**:
    * Subordinate to all problem/warning gates: only sustain-safe 8–16 beat phrases with
-     zero hard/soft conflicts, high level-relative ``chirality_comfort``, healthy L/R
-     hand alternation, and varied maimai DX mechanics receive positive boost weights.
+     zero hard/soft conflicts, high level-relative ``chirality_comfort``,
+     and varied maimai DX mechanics receive positive boost weights.
      The acoustic mode also requires verified onset support.
 
 The report also locates short event gaps, unusual beat differences, rapid repeats,
@@ -935,20 +935,10 @@ def _phrase_craftsmanship_candidates(
         if flow_score < 0.35 or max_spike > 1.65 or mean_hemi > 0.12:
             continue
 
-        alt_pairs = int(cov.get("alternation_pairs", 0))
-        alt_ratio = float(cov.get("alternation_ratio", 1.0))
-        if alt_pairs >= 4 and alt_ratio < 0.25:
-            continue
-
         traj_smooth = min(1.0, max(0.0, (float(flow_score) - 0.32) / 0.48))
         hemi_clean = min(1.0, max(0.0, 1.0 - mean_hemi / 0.12))
         strain_clean = min(1.0, max(0.0, 1.0 - max(0.0, max_spike - 0.55) / 1.20))
         flow_term = 0.45 * traj_smooth + 0.30 * hemi_clean + 0.25 * strain_clean
-        if alt_pairs >= 3:
-            # Sweet spot for maimai DX button alternation is [0.55, 0.95].
-            alt_term = min(1.0, max(0.0, (alt_ratio - 0.20) / 0.65))
-        else:
-            alt_term = 0.78 if (has_slide or has_touch) else 0.65
 
         mechanic_count = sum((has_slide, has_hold, has_touch, has_chord, has_break))
         mechanic_synergy = min(1.0, mechanic_count / 2.5)
@@ -966,9 +956,9 @@ def _phrase_craftsmanship_candidates(
             if sup < 0.32:
                 continue
             acoustic_term = min(1.0, max(0.0, (sup - 0.25) / 0.50))
-            craft_score = 0.36 * flow_term + 0.20 * alt_term + 0.24 * variety_term + 0.20 * acoustic_term
+            craft_score = 0.45 * flow_term + 0.30 * variety_term + 0.25 * acoustic_term
         else:
-            craft_score = 0.45 * flow_term + 0.25 * alt_term + 0.30 * variety_term
+            craft_score = 0.60 * flow_term + 0.40 * variety_term
 
         candidates.append(
             {

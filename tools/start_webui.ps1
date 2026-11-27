@@ -15,7 +15,8 @@ $Cuda = $false
 $NoBrowser = $false
 $NoInstall = $false
 $Reinstall = $false
-$Port = 7860
+$HandPreview = $ScriptArgs -contains "--hand-preview"
+$Port = if ($HandPreview) { 17868 } else { 7860 }
 $SupportedPythonMin = [version]"3.10"
 $SupportedPythonMax = [version]"3.16"
 $SupportedPythonRange = "Python >= $($SupportedPythonMin.ToString(2)) and < $($SupportedPythonMax.ToString(2))"
@@ -37,6 +38,7 @@ foreach ($file in "pyproject.toml", "src\maichart\webui\server.py", "src\maichar
 for ($index = 0; $index -lt $ScriptArgs.Count; $index++) {
     $argument = [string]$ScriptArgs[$index]
     switch -Regex ($argument.ToLowerInvariant()) {
+        "^--hand-preview$" { continue }
         "^--check$" { $CheckOnly = $true; continue }
         "^--cpu$" { $Cpu = $true; continue }
         "^--cuda$" { $Cuda = $true; continue }
@@ -306,6 +308,22 @@ Write-Host "Python: $Python ($($pythonInfo.Version))"
 $env:PYTHONPATH = Join-Path $ProjectRoot "src"
 $env:PYTHONNOUSERSITE = "1"
 Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+
+if ($HandPreview) {
+    $LaunchStage = "hand preview"
+    & $Python -c "from maichart.legacy_hands.preview import handler_for; from maichart.legacy_hands.player_motion import reference_data; reference_data()"
+    if ($LASTEXITCODE -ne 0) { Fail "Hand preview modules or simulation reference files are missing." }
+    $startupLock.ReleaseMutex()
+    $startupLock.Dispose()
+    if ($CheckOnly) { Write-Host "Hand preview environment ready."; exit 0 }
+    $previewArgs = @("--port", "$Port")
+    if (-not $NoBrowser) { $previewArgs += "--open-browser" }
+    Push-Location $ProjectRoot
+    try {
+        & $Python -m maichart.legacy_hands.preview @previewArgs
+        exit $LASTEXITCODE
+    } finally { Pop-Location }
+}
 
 $LaunchStage = "dependency check"
 $DependencyArgs = @("--profile", "composer-v2")

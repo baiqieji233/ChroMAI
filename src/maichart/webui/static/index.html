@@ -70,6 +70,7 @@
 <div class="review-tools-heading"><strong>审阅工具</strong><span>试听 · 标记 · 收集</span></div>
 <section class="review-tool-group"><h4>当前范围</h4><p id="feedbackRange" role="status">你正在评价：整张谱面</p><div class="generation-preview-toolbar"><button id="feedbackPlayRange" class="secondary-button" type="button">循环试听这一段</button><button id="feedbackPause" class="small-button" type="button">暂停</button><button id="feedbackClear" class="small-button" type="button">清除选择</button></div><label class="checkbox-field"><input id="feedbackContext" type="checkbox" checked>带上前后文（各4秒）</label>
 <p id="feedbackAuditionRange" class="muted">反馈范围与试听范围分开记录；带前后文只影响播放。</p>
+<button type="button" id="reviewHandPhrase" class="secondary-button">查看这段手顺（实验）</button><small>在新窗口比较左右手接法。可先圈选乐句，未圈选时从播放点起看 12 秒。</small>
 <details class="preview-review-exact"><summary>精确范围／播放点标记</summary><button id="feedbackMarkStart" class="small-button" type="button">播放点 → 起点</button><button id="feedbackMarkEnd" class="small-button" type="button">播放点 → 终点</button><label>起点 <input id="feedbackStart" type="number" min="0" step="0.01" placeholder="全曲"></label><label>终点 <input id="feedbackEnd" type="number" min="0" step="0.01" placeholder="全曲"></label></details>
 </section>
 <section id="candidatePoolReview" class="candidate-pool-panel" hidden>
@@ -426,6 +427,10 @@
     <label class="field">写法学习权重<input id="v2TrainFutureConfigurationWeight" type="number" value="0.05" min="0" max="1" step="any" required><small>默认 0.05，控制真实谱面对写法预测的监督强度。生成时使用模型从音乐预测的结果。</small></label>
     <label class="field">盘面走势学习（实验）<select id="v2TrainSpatialPolicy"><option value="auto" selected>自动（沿用检查点，新模型关闭）</option><option value="off">关闭</option><option value="slide_geometry_v1">仅学习 Slide 轨迹</option><option value="disk_geometry_v1">Slide 轨迹与前文走势</option></select><small>从已有模型试用时请选择微调和新输出目录。前文走势帮助模型根据刚写出的配置选择下一处外键。</small></label>
     <label class="field">编排构思学习（实验）<select id="v2TrainIntentPolicy"><option value="auto" selected>自动（新训练关闭，沿用检查点）</option><option value="off">关闭</option><option value="phrase_intent_v1">启用编排构思学习</option></select><small id="v2TrainIntentHelp">用真人谱面学习乐句走向，生成时据整首音乐和目标难度选构思。从已有模型启用时请选择微调和新输出目录。</small></label>
+    <label class="field">下一组动作预判（实验）<select id="v2TrainHandPlanPolicy"><option value="auto" selected>自动（沿用检查点，新模型关闭）</option><option value="contact_plan_v1">动作预判（原版）</option><option value="contact_memory_readout_v2">动作预判＋手顺读出</option><option value="contact_memory_v2">动作预判＋手顺读出与反馈</option><option value="off">关闭</option></select><small>手顺读出在每组写完后估计左右手和动作衔接。启用反馈后，下一组选择配置时可以引用它。已有连续事件模型可在新目录微调。</small></label>
+    <label class="field" id="v2HandLimitField" hidden>手顺标注训练谱面上限<input type="number" id="v2TrainHandLabelLimit" min="0" step="1" placeholder="128"><small>0 为全量。上限只影响手顺弱标注，其余谱面仍按原用途学习。</small></label>
+    <label class="field" id="v2HandWorkersField" hidden>手顺缓存并行进程<input type="number" id="v2TrainHandLabelWorkers" min="1" max="32" step="1" placeholder="自动，最多 4"><small>只在缓存缺失时启动。</small></label>
+    <div id="v2MechanicsSources" class="field" hidden><strong>各来源的学习用途</strong><div id="v2MechanicsSourceList" class="form-grid"></div><small id="v2MechanicsSourceHelp"></small></div>
     <label class="field">微调范围<select id="v2TrainFinetuneScope" disabled><option value="auto" selected>自动</option><option value="all">全部参数</option><option value="music_reading">音乐读取连接</option><option value="intent_only">仅编排构思</option></select><small>首次在已有模型启用编排构思时，自动只训练构思模块，沿用检查点已有的音乐、写法和音频设置。</small></label>
   </div></div>
 </details>
@@ -2177,11 +2182,11 @@
   </main>
   <script src="/workspace_logs.js"></script>
   <script src="/chart_preview.js?v=20261122-generation-history"></script>
-  <script src="/app.js?v=20261125-phrase-intent"></script>
+  <script src="/app.js?v=20261127-hand-memory"></script>
   <script src="/reference_tempo.js?v=20261119-tempo-history" onerror="document.getElementById('v2ReferenceBadge').textContent='请重启此 WebUI 服务后刷新'"></script>
   <script src="/v2_intensity.js?v=20261123-local-tempo"></script>
   <script src="/review_exchange.js"></script>
   <script src="/candidate_feedback.js?v=20261122-generation-history"></script>
-  <script src="/workspace.js?v=20261125-phrase-intent"></script>
+  <script src="/workspace.js?v=20261127-hand-memory"></script>
 </body>
 </html>

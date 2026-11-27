@@ -193,14 +193,22 @@ def post(endpoint, payload, *, runtime):
         if any(not isinstance(value,str) or not Path(value).is_file() for value in values):
             raise ValueError('请选择有效的训练清单')
         values=list(dict.fromkeys(str(Path(value).resolve()) for value in values))
-        key=_digest(sorted(values))
+        roles=payload.get('mechanics_manifests', [])
+        if not isinstance(roles,list) or any(not isinstance(v,str) or not v.strip() for v in roles):
+            raise ValueError('仅练动作的来源必须是清单路径列表')
+        selected={Path(v) for v in values}
+        mechanics={Path(v).resolve() for v in roles}
+        if mechanics-selected:
+            raise ValueError('估算的动作来源必须已选中')
+        request_data=dict(manifests=sorted(values),mechanics_manifests=sorted(str(p) for p in selected & mechanics))
+        key=_digest(request_data)
         with _START_LOCK:
             for task in runtime._all_tasks():
                 if task.kind=='candidate_budget' and task.status in ('queued','running') and task.result.get('request_key')==key:
                     return 200,dict(task_id=task.task_id,status=task.status)
             root=runtime.WEBUI_ROOT/'supervision_budgets'/uuid.uuid4().hex
             request=root/'request.json';output=root/'result.json'
-            _write(request,dict(manifests=values))
+            _write(request,request_data)
             task=runtime._create_task('candidate_budget')
             task.result.update(request_key=key,budget_output=str(output))
             runtime._run_subprocess_task(task,['-m','maichart.training.candidate_budget','--request',str(request),

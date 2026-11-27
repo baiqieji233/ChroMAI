@@ -3,12 +3,14 @@ const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "act
 const V2_MUSICAL_CONTEXT_FIELDS = ["musical_context", "musical_context_probability"];
 const V2_JOINT_DEVELOPMENT_FIELDS = [
   "musical_relation_policy", "musical_relation_fraction", "future_configuration_policy",
-  "future_configuration_weight", "spatial_policy", "finetune_scope",
+  "future_configuration_weight", "spatial_policy", "finetune_scope", "hand_plan_policy", "hand_label_limit",
 ];
 const V2_PREFIX_FIELDS = ['generated_prefix_mode', 'generated_prefix_bank'];
 const V2_INHERITED_LEARNING_FIELDS = [...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS,
   ...V2_PREFIX_FIELDS, 'timing_recovery', 'lr_decay_end_step', 'intent_policy'];
 COMPOSER_V2_FIELDS.push(...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS, 'lr_decay_end_step', 'intent_policy', ...V2_PREFIX_FIELDS);
+COMPOSER_V2_FIELDS.push('hand_label_workers');
+const handPolicyNames = {contact_plan_v1:'动作预判（原版）',contact_memory_readout_v2:'预判＋手顺读出',contact_memory_v2:'预判＋手顺读出与反馈'};
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -33,11 +35,14 @@ function composerV2TrainingPayload(options={}) {
   const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy","difficulty_source","open_mdp_dir","chartgate_dir","batch_layout","local_audio_block_beats","attention_projection_packing","decoder_flash_attention"]);
   strings.add("musical_context");
   for(const key of ["musical_relation_policy", "future_configuration_policy", "spatial_policy", "finetune_scope", "intent_policy"])strings.add(key);
+  strings.add("hand_plan_policy");
   for(const key of V2_PREFIX_FIELDS)strings.add(key);
   for(const key of COMPOSER_V2_FIELDS) {
     if(key==='song_layers' && payload.mode!=='fresh')continue;
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw && key==='intent_policy' && element('#v2TrainIntentPolicy')?.disabled)continue;
+    if(raw && key==='hand_plan_policy' && element('#v2TrainHandPlanPolicy')?.disabled)continue;
+    if(key.startsWith('hand_label_') && element('#v2HandLimitField')?.hidden)continue;
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
   }
   // Disabled automatic-split controls must not override an explicit manual
@@ -80,10 +85,21 @@ function composerV2TrainingPayload(options={}) {
     const chosen=payload.manifests.filter(path=>!datasetWorkspaceState.autoQualityExcluded.has(path));
     if (chosen.length!==payload.manifests.length) payload.auto_quality_manifests=chosen;
   }
+  if (payload.mode!=='resume' && payload.manifests.length && typeof mechanicsTrainingSources==='function') {
+    const rolePaths = mechanicsTrainingSources(payload.manifests);
+    if (rolePaths.length) payload.mechanics_manifests = rolePaths;
+  }
   return payload;
 }
 
 function assertV2AutoQualitySources(options, capabilities) {
+  if (options.mechanics_manifests?.length && !handPlanEnabled())
+    throw new Error('所选来源含「仅练动作」。请启用「下一组动作预判」，或将该来源改为「完整学习」。');
+  if ((options.hand_plan_policy==='contact_plan_v1' || options.mechanics_manifests?.length)
+      && !capabilities?.composer_v2_hand_plan)
+    throw new Error('请重启 WebUI 后台以载入下一组动作预判。');
+  if (options.hand_plan_policy?.startsWith('contact_memory_') && !capabilities?.composer_v2_hand_memory)
+    throw new Error('请重启 WebUI 后台以载入手顺读出与反馈。');
   if (options.auto_quality_manifests===undefined) return;
   if (options.auto_quality_policy==='on' && !options.auto_quality_manifests.length) {
     throw new Error('已要求使用自动体检。请至少勾选一个来源，或将自动分段质检策略改为「自动」。');
@@ -500,6 +516,8 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   saved.future_configuration_policy = data.model_config?.future_configuration_policy ?? 'off';
   saved.future_configuration_weight = data.model_config?.future_configuration_weight ?? 0.05;
   saved.spatial_policy = data.model_config?.spatial_policy ?? 'off';
+  saved.hand_plan_policy = data.model_config?.hand_plan_policy ?? 'off';
+  saved.hand_label_limit = data.training_contract?.hand_labels?.train?.limit ?? '';
   saved.intent_policy = data.model_config?.intent_policy ?? 'off';
   saved.finetune_scope = data.training_contract?.finetune_scope ?? 'all';
   saved.timing_recovery = data.training_contract?.timing_recovery ?? 'off';
@@ -1120,6 +1138,7 @@ function composerV2TrainingView(task) {
         : runtime.musical_relation_policy==='off' ? '关闭' : '未记录'],
       ['盘面走势学习',({disk_geometry_v1:'Slide 轨迹与前文走势',slide_geometry_v1:'仅 Slide 轨迹'})[runtime.spatial_policy ?? config.spatial_policy] || '关闭'],
       ['编排构思学习',(runtime.intent_policy ?? config.intent_policy ?? settings.intent_policy)==='phrase_intent_v1'?'已启用（实验）':'关闭'],
+      ['下一组动作预判',handPolicyNames[runtime.hand_plan_policy ?? config.hand_plan_policy ?? settings.hand_plan_policy] || '关闭'],
       ['局部写法学习',runtime.future_configuration_policy==='audio_writing_v4'
         ? `乐句衔接与留白 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
         :runtime.future_configuration_policy==='audio_grid_v4'
@@ -1161,6 +1180,25 @@ function composerV2TrainingView(task) {
       ['构思引导强度',show(n(metrics,'intent_execution_strength'))],
       ['候选分数改变量',show(n(metrics,'intent_logit_shift'))],
       ['验证误差（原示范 / 倒序示范）',show(n(complete,'validation_intent_reconstruction_loss'))+' / '+show(n(complete,'validation_intent_shuffled_support_loss'))]]]);
+  }
+  if (handPolicyNames[runtime.hand_plan_policy ?? config.hand_plan_policy ?? settings.hand_plan_policy]) {
+    const calibration=complete?.validation_hand_plan_calibration;
+    const rows=[['训练动作 loss',show(n(metrics,'hand_plan_loss'))],
+      ['验证动作 loss',show(n(complete,'validation_hand_plan_loss'))]];
+    if (calibration) {
+      rows.push(['可对照的弱标注触点',String(calibration.weak_contacts)],
+        ['左右手概率均方误差 / 各半基线',show(calibration.mean_squared_probability_error)+' / '+show(calibration.neutral_error)]);
+      for(const bin of calibration.bins||[])if(bin.count)rows.push([
+        '模型平均把握 '+Math.round(bin.predicted*100)+'%（'+bin.count+' 个触点）',
+        '算法参照支持 '+Math.round(bin.weak_agreement*100)+'%']);
+    }
+    cards.push(['下一组动作预判 · 与算法参照对照',rows]);
+    if (complete?.validation_hand_memory_evidence) {
+      const names={first_left:'首触点左右手',second_left:'第二触点左右手',same_previous:'前后同手',same_pair:'同拍共手',same_return:'回到原键同手'};
+      const measures=Object.entries(complete.validation_hand_memory_evidence).map(([field,v])=>[
+        names[field],`较强 ${v.strong} / 可评估 ${v.evaluated}，与弱标注分歧 ${v.weak_disagreements}`]);
+      cards.push(['写完后的手顺读出',measures]);
+    }
   }
   const spatial=runtime.spatial_policy ?? config.spatial_policy ?? settings.spatial_policy;
   const checks=new Map();
@@ -1937,7 +1975,7 @@ const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, fol
 // sources feed training, while activeDataset is the source currently being
 // browsed/annotated. This prevents a merged training manifest from hiding the
 // origin of a quality label.
-const datasetWorkspaceState = { items: [], selected: new Set(), autoQualityExcluded: new Set(), activePath: "", catalog: null, catalogRequest: 0, selectionTouched: false, view: "cards", prepared: null, applying: false };
+const datasetWorkspaceState = { items: [], selected: new Set(), autoQualityExcluded: new Set(), mechanicsSources: new Set(), activePath: "", catalog: null, catalogRequest: 0, selectionTouched: false, view: "cards", prepared: null, applying: false };
 const intensityView = { start: 0, end: null, selected: new Set(), gesture: null, spectrogram: null, specSource: null, sectionSelectionKey: "" };
 let settingsSaveTimer = null;
 const preprocessTasks = new Map();
@@ -2166,6 +2204,8 @@ function restoreSettings() {
   // fields does not silently discard a carefully curated source list.
   try {
     const datasetSaved = JSON.parse(localStorage.getItem(datasetStorageKey));
+    if (Array.isArray(datasetSaved?.mechanics_sources))
+      datasetWorkspaceState.mechanicsSources = new Set(datasetSaved.mechanics_sources.filter(p=>typeof p==='string'));
     if (Array.isArray(datasetSaved?.datasets)) datasetWorkspaceState.selected = new Set(datasetSaved.datasets.map((item) => String(item.manifest || item.path || item)).filter(Boolean));
     if (Array.isArray(datasetSaved?.auto_quality_excluded)) {
       datasetWorkspaceState.autoQualityExcluded = new Set(datasetSaved.auto_quality_excluded.filter(path=>typeof path==='string' && path));
@@ -2341,6 +2381,7 @@ function saveDatasetWorkspace() {
     current.version = 2;
     current.datasets = [...datasetWorkspaceState.selected];
     current.auto_quality_excluded = [...datasetWorkspaceState.autoQualityExcluded];
+    current.mechanics_sources = [...(datasetWorkspaceState.mechanicsSources || [])];
     current.selection_touched = datasetWorkspaceState.selectionTouched;
     current.active_dataset = datasetWorkspaceState.activePath || "";
     current.raw_root = valueOrDefault("#rawRoot", "").trim();
@@ -4335,7 +4376,7 @@ function updateTrainingControls() {
         node.value=node.dataset.beforeResumeMusicalContext;
         delete node.dataset.beforeResumeMusicalContext;
       }
-      const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience','activation_checkpointing','batch_size','grad_accumulation','batch_layout','attention_projection_packing','decoder_flash_attention'].includes(key);
+      const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience','activation_checkpointing','batch_size','grad_accumulation','batch_layout','attention_projection_packing','decoder_flash_attention','hand_label_workers'].includes(key);
       node.disabled=(v2Resume && !resourceBudget) || (currentModelFamily()==='chart_composer_v2' && currentTrainingMode()==='finetune' && v2Fixed.has(key));
       node.title=node.disabled?'继承 checkpoint 的固定设置；模型合同变化需要从头训练。':'';
       if(v2Resume && V2_INHERITED_LEARNING_FIELDS.includes(key))
@@ -4349,6 +4390,7 @@ function updateTrainingControls() {
       ? checkpointInspection.data : null;
     const windowModel=currentTrainingMode()!=='fresh' && inspected?.sequence_policy==='window_v1';
     if(windowModel)intentField.disabled=true;
+    if(windowModel && element('#v2TrainHandPlanPolicy'))element('#v2TrainHandPlanPolicy').disabled=true;
     element('#v2TrainIntentHelp').textContent=v2Resume
       ? '断点续训沿用检查点的编排构思设置。'
       : windowModel ? '此设置适用于连续事件模型。'
@@ -5312,7 +5354,59 @@ function selectedDatasetItems() {
   return datasetWorkspaceState.items.filter((item) => datasetWorkspaceState.selected.has(datasetKey(item)));
 }
 
+function effectiveHandPolicy() {
+  const choice = valueOrDefault('#v2TrainHandPlanPolicy','auto');
+  if (currentTrainingMode()!=='resume' && choice!=='auto') return choice;
+  return currentTrainingMode()!=='fresh' && checkpointInspection.key===currentCheckpointKey()
+    && checkpointInspection.data?.model_config?.hand_plan_policy || 'off';
+}
+function handPlanEnabled() {
+  return Boolean(handPolicyNames[effectiveHandPolicy()]);
+}
+
+function mechanicsTrainingSources(manifests, includeResume=false) {
+  if (currentModelFamily()!=='chart_composer_v2') return [];
+  if (currentTrainingMode()==='resume') {
+    if (!includeResume || checkpointInspection.key!==currentCheckpointKey()) return [];
+    const inherited=checkpointInspection.data?.mechanics_manifests || [];
+    return manifests.filter(path=>inherited.some(p=>sameAuditManifest(p,path)));
+  }
+  return manifests.filter(p=>datasetWorkspaceState.mechanicsSources.has(p));
+}
+
+function renderMechanicsSources() {
+  const memory=effectiveHandPolicy().startsWith('contact_memory_');
+  for (const id of ['v2HandLimitField','v2HandWorkersField']) {
+    const field=element('#'+id);
+    if (field) field.hidden=!memory;
+  }
+  const group=element('#v2MechanicsSources');
+  if (!group) return;
+  const items=selectedDatasetItems().filter(i=>i.manifest && i.prepared!==false);
+  const hasRoles=mechanicsTrainingSources(items.map(i=>i.manifest),true).length>0;
+  const enabled=currentModelFamily()==='chart_composer_v2' && (handPlanEnabled() || hasRoles);
+  group.hidden=!enabled;
+  if (!enabled) return;
+  const resume=currentTrainingMode()==='resume';
+  const inherited=checkpointInspection.data?.mechanics_manifests || [];
+  const list=element('#v2MechanicsSourceList');
+  const key=JSON.stringify([items.map(i=>[i.manifest,i.name]),resume]);
+  if (key!==list.dataset.sourceKey) {
+    list.dataset.sourceKey=key;
+    list.innerHTML=items.map(i=>`<label class="field">${escapeHtml(i.name || i.manifest)}<select data-mechanics-source="${escapeHtml(i.manifest)}"><option value="full">完整学习</option><option value="mechanics">仅练动作</option></select></label>`).join('');
+  }
+  for (const select of list.querySelectorAll('select')) {
+    select.disabled=resume;
+    const path=select.dataset.mechanicsSource;
+    select.value=(resume?inherited.some(p=>sameAuditManifest(p,path)):datasetWorkspaceState.mechanicsSources.has(path))?'mechanics':'full';
+  }
+  element('#v2MechanicsSourceHelp').textContent=resume?'续训沿用上次保存的用途。':
+    hasRoles && !handPlanEnabled()?'选中的来源含「仅练动作」。请开启「下一组动作预判」，或将该来源改为「完整学习」。':
+    items.length?'精选谱可用「完整学习」。普通谱可用「仅练动作」，只训练动作预判。至少保留一个完整学习来源。':'当前单份清单按保存的用途学习。要给多个谱库分别设置用途，请先选择本次训练来源。';
+}
+
 function renderV2AutoQualitySources() {
+  if (element('#v2MechanicsSources') && typeof renderMechanicsSources==='function') renderMechanicsSources();
   const group=element('#v2AutoQualitySources');
   if (!group) return;
   const items=selectedDatasetItems().filter(item=>item.manifest && item.prepared!==false);
@@ -5385,7 +5479,8 @@ async function composeSelectedDatasets() {
     const family = currentModelFamily();
     let data;
     try {
-      data = await api("/api/datasets/compose", { manifests, dataset_paths: paths, datasets: items, model_family: family });
+      data = await api("/api/datasets/compose", { manifests, dataset_paths: paths, datasets: items, model_family: family,
+        mechanics_manifests: mechanicsTrainingSources(manifests) });
     } catch (error) {
       if (!String(error.message || "").match(/404|Not Found|不存在|未找到/i)) throw error;
       throw new Error("当前 WebUI 后端尚未提供多数据集合并接口，请重启/更新服务后再应用多选数据集。");
@@ -5644,7 +5739,7 @@ const TRAINING_PREVIEW_KINDS = {
 function trainingSourcePreviewOptions() {
   if (currentModelFamily() !== "chart_composer_v2") return null;
   const payload = composerV2TrainingPayload();
-  const keys = ["mode", "quality_enabled", "auto_quality_policy", "auto_quality_manifests", "difficulty_source", "min_level", "max_level",
+  const keys = ["mode", "quality_enabled", "auto_quality_policy", "auto_quality_manifests", "mechanics_manifests", "hand_plan_policy", "difficulty_source", "min_level", "max_level",
     "min_declared_level", "difficulty_slots", "limit_charts", "cache_dir", "init_checkpoint",
     "validation_source", "validation_manifest", "holdout_fraction", "seed", "open_mdp_dir", "chartgate_dir"];
   return Object.fromEntries(keys.filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
@@ -5719,6 +5814,7 @@ function renderTrainingSourcePreviewOverview(data, sourceNames) {
   const sourceRows = (inc.by_source || []).map(src => {
     const pct = (Number(src.weight_share || 0) * 100).toFixed(1) + "%";
     const tierNote = [
+      src.mechanics_charts ? `仅练动作 ${src.mechanics_charts}` : "",
       src.boosted_charts ? `加权 ${src.boosted_charts}` : "",
       src.standard_charts ? `整谱 ${src.standard_charts}` : "",
       src.masked_charts ? `局部/屏蔽 ${src.masked_charts}` : "",
@@ -5851,7 +5947,7 @@ function renderTrainingSourcePreviewPage(reset = false) {
 async function inspectManifest({ preview = true } = {}) {
   assertTrainingSelection();
   const previewOptions = preview ? trainingSourcePreviewOptions() : null;
-  const {auto_quality_manifests: autoQualityManifests,...previewConfig}=previewOptions || {};
+  const {auto_quality_manifests: autoQualityManifests,mechanics_manifests: mechanicsManifests,...previewConfig}=previewOptions || {};
   if (!previewOptions) await assertDatasetBackend();
   const sourcePaths = trainingSourcePaths();
   const manifest = sourcePaths.manifest;
@@ -5878,6 +5974,7 @@ async function inspectManifest({ preview = true } = {}) {
       ...sourcePaths, manifests, dataset_paths:items.map(item=>item.path).filter(Boolean), model_family:modelFamily,
       ...(previewOptions ? {training_source_preview:previewConfig} : {}),
       ...(autoQualityManifests===undefined ? {} : {auto_quality_manifests:autoQualityManifests}),
+      ...(mechanicsManifests===undefined ? {} : {mechanics_manifests:mechanicsManifests}),
     });
   } catch (error) {
     if (request === manifestRequest) {
@@ -9122,6 +9219,17 @@ on('#trainingCheckpointPath','input',()=>{
   }
 });
 on("#v2TrainQualityEnabled", "change", () => {updateTrainingControls();saveSettings();});
+on('#v2TrainHandPlanPolicy','change',()=>{renderMechanicsSources();invalidateTrainingSourcePreview(false);saveSettings();});
+on('#v2MechanicsSourceList','change',event=>{
+  const select=event.target;
+  const path=select.dataset?.mechanicsSource;
+  if (!path || select.disabled || currentTrainingMode()==='resume') return;
+  if (select.value==='mechanics') datasetWorkspaceState.mechanicsSources.add(path);
+  else datasetWorkspaceState.mechanicsSources.delete(path);
+  datasetWorkspaceState.prepared=null;
+  saveDatasetWorkspace();
+  invalidateTrainingSourcePreview(false);
+});
 on('#v2AutoQualitySourceList','change',event=>{
   const input=event.target;
   const path=input.dataset?.autoQualitySource;

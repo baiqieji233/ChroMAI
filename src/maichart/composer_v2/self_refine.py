@@ -75,6 +75,7 @@ def refine_worst_spans(
     guard_options: dict[str, Any] | None = None,
     bypassed_events: list[dict[str, Any]] | None = None,
     max_spans: int = 2,
+    record_hand=None,
 ) -> tuple[list[Any], Any, dict[str, Any]]:
     policy = validate_self_refine(getattr(args, "self_refine", "off"))
     if policy == "off":
@@ -174,6 +175,7 @@ def refine_worst_spans(
             mid_pts: list[Any] = []
             ok = True
             complete = False
+            sampled_hand = []
             for _step in range(96):
                 accepted_pt = None
                 accepted_ids = None
@@ -218,6 +220,7 @@ def refine_worst_spans(
                     ok = False
                     break
                 mid_pts.append(accepted_pt)
+                if record_hand is not None:sampled_hand.append((accepted_pt,accepted_ids))
                 target.extend(accepted_ids)
                 cursor = accepted_pt.beat
                 if (cursor >= getattr(sampler, 'reference_refresh_beat', end)
@@ -239,10 +242,12 @@ def refine_worst_spans(
             )
             improved = had_bypass or (cand_score >= orig_eval_score + MIN_IMPROVEMENT)
             if improved and (best_choice is None or cand_score > best_choice[0]):
-                best_choice = (cand_score, spliced, full_guard)
+                best_choice = (cand_score, spliced, full_guard, sampled_hand)
 
         if best_choice is not None:
-            new_score, current_points, current_guard = best_choice
+            new_score, current_points, current_guard, sampled_hand = best_choice
+            if record_hand is not None:
+                for pt,ids in sampled_hand:record_hand(pt,ids)
             replaced_count += 1
             bypassed_beats = {beat for beat in bypassed_beats if not b0 <= beat < b1}
             if bypassed_events is not None and had_bypass:

@@ -37,6 +37,8 @@ def parser():
     result.add_argument('--level', type=float, default=13.)
     result.add_argument('--eos-suppression', action='store_true',
                         help='Reduce premature EOS on continuous-event checkpoints and fade the bias near the audio end')
+    result.add_argument('--no-hand-memory-feedback',action='store_true',
+                        help='同一检查点只读出手顺，关闭新版记忆对配置的反馈，便于同种子对照')
     result.add_argument('--title', default=None, help='Chart title; omitted reads audio tags or falls back to audio filename')
     result.add_argument('--artist', default=None, help='Track artist; omitted reads audio tags; empty string clears')
     result.add_argument('--designer', default=None, help='Chart designer credit; omitted uses Composer v2 default')
@@ -494,6 +496,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     model = model_override if model_override is not None else ComposerV2(config, codec)
     if model_override is None:
         model.load_state_dict(payload['model_state_dict'], strict=True)
+    if hasattr(model,'hand_memory'):
+        model.hand_qualified=tuple(payload.get('hand_memory_qualified',()))
     model = model.to(device).eval()
     from .inference_runtime import configure_model
     configure_model(model, args, device)

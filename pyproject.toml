@@ -63,6 +63,7 @@ music-structure = [
 [project.scripts]
 chromai = "maichart.cli:main"
 chromai-webui = "maichart.webui.server:main"
+chromai-hand-preview = "maichart.legacy_hands.preview:main"
 maichart = "maichart.cli:main"
 maichart-train = "maichart.training.train_generator:main"
 maichart-generate = "maichart.generation.cli:main"

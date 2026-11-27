@@ -9,7 +9,7 @@ import tempfile
 import time
 import torch
 from .codec import ComponentCodec
-from . import intent_policy, spatial_policy
+from . import hand_plan, intent_policy, spatial_policy
 from .conditions import LEVEL_ONLY,RADAR_STYLE,condition_contract,policy_from_config
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, configuration_view_fraction,
@@ -93,6 +93,37 @@ def inspect_payload(payload):
             or isinstance(training, dict) and saved_training.get('intent_policy', 'off') != intent):
         errors.append('编排构思设置与模型或训练合同不一致')
     weights = payload.get('model_state_dict')
+    plan=model_fields.get('hand_plan_policy','off')
+    if (plan not in hand_plan.CHOICES[1:] or (plan!='off' and not continuous) or
+            isinstance(training,dict) and saved_training.get('hand_plan_policy','off')!=plan):
+        errors.append('手顺预判设置与训练合同不一致')
+    if isinstance(weights,dict) and plan in hand_plan.CHOICES[2:]:
+        width=model_fields.get('d_model')
+        fields=len(hand_plan.FIELDS)
+        classes=len(hand_plan.KINDS)+len(hand_plan.POSITIONS)
+        required={'observe.weight': (fields,width), 'observe.bias': (fields,),
+                  'predict.weight': (fields,width+fields if isinstance(width,int) else None),
+                  'predict.bias': (fields,), 'execute.weight': (classes,fields*2)}
+        for key,shape in required.items():
+            value=weights.get('hand_plan.'+key)
+            if not isinstance(value,torch.Tensor) or tuple(value.shape)!=shape:
+                errors.append('手顺预判权重缺失或尺寸不符：'+key)
+    if isinstance(weights,dict) and plan=='off' and any(key.startswith('hand_plan.') for key in weights):
+        errors.append('检查点含手顺预判权重但未声明手顺预判策略')
+    if isinstance(weights,dict):
+        if plan in hand_plan.hand_memory.POLICIES:
+            fields=len(hand_plan.hand_memory.FIELDS)*3
+            qualified=payload.get('hand_memory_qualified',[])
+            categories={f'{field}/{family}' for field in hand_plan.hand_memory.FIELDS for family in hand_plan.hand_memory.FAMILIES}
+            if not isinstance(qualified,list) or any(not isinstance(field,str) or field not in categories for field in qualified):
+                errors.append('手顺置信度留出验证字段不完整')
+            for name,shape in (('readout.weight',(fields,width)),('readout.bias',(fields,)),
+                               ('execute.weight',(classes,hand_plan.hand_memory.FEATURES))):
+                tensor=weights.get('hand_memory.'+name)
+                if not isinstance(tensor,torch.Tensor) or tuple(tensor.shape)!=shape:
+                    errors.append('手顺记忆权重缺失或尺寸不符：'+name)
+        elif any(k.startswith('hand_memory.') for k in weights):
+            errors.append('检查点含未声明的手顺记忆权重')
     if isinstance(weights, dict) and intent == intent_policy.POLICY:
         from .intent import VARIANTS, WIDTH
         for name, shape in (('intent.codebook', (VARIANTS, WIDTH)),
@@ -197,7 +228,7 @@ def inspect_payload(payload):
         vocab_size=len(tokens) if not errors else None,
         training_contract=payload.get("training_contract") or {},
         training_capabilities=dict(musical_relation_policy=relation_policy, musical_relation_fraction=relation_fraction,
-            intent_policy=intent,
+            intent_policy=intent, hand_plan_policy=plan,
             spatial_policy=spatial,
             future_configuration_policy=future_policy, future_configuration_weight=future_weight,
             future_configuration_train_view_fraction=future_train_view_fraction, finetune_scope=scope),

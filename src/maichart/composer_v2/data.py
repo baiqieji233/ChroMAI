@@ -69,6 +69,7 @@ class ComposerV2Song:
     chart_sha256: str | None = None
     event_token_lengths: list[int] = field(default_factory=list)
     stream_cache_key: str | None = None
+    learning_role: str = 'full'
 
 
 class ComposerV2Dataset(Dataset):
@@ -83,7 +84,7 @@ class ComposerV2Dataset(Dataset):
                  quality_enabled=True, condition_policy=RADAR_STYLE,sequence_policy='window_v1',
                  extend_vocabulary=False, dialect_policy=chart_dialect.POLICY,
                  auto_quality_policy='off', difficulty_scorer=None, min_declared_level=0.,
-                 difficulty_slots=None, validate_fixed_vocabulary=False, chart_subset=None):
+                 difficulty_slots=None, validate_fixed_vocabulary=False, chart_subset=None, full_sources_only=False):
         if window_beats<1 or history_beats<0 or future_beats<0 or any(int(v)!=v for v in (window_beats,history_beats,future_beats)):
             raise ValueError('Window lengths must be integral beats; target positive, history/future nonnegative')
         if int(max_tokens) < 4:
@@ -150,6 +151,16 @@ class ComposerV2Dataset(Dataset):
             for difficulty in entry.get('difficulties', []):
                 if limit_charts and len(self.songs) >= limit_charts:
                     break
+                role = difficulty.get('learning_role',entry.get('learning_role','full'))
+                if role not in ('full','mechanics'):
+                    raise ValueError('未知的素材学习用途')
+                if role=='mechanics':
+                    if full_sources_only:
+                        self.audit.setdefault('mechanics_validation_excluded',0)
+                        self.audit['mechanics_validation_excluded']+=1
+                        continue
+                    if getattr(self,'hand_plan_policy','off')=='off':
+                        raise ValueError('用于动作学习的素材需要开启手顺预判')
                 slot = int(difficulty.get('difficulty_index', difficulty.get('index', 0)))
                 if not min_difficulty_index <= slot <= max_difficulty_index:
                     continue
@@ -209,6 +220,7 @@ class ComposerV2Dataset(Dataset):
                         source, audio_path, slot, level, list(chart.points),
                         TempoClock(chart.tempo_changes, chart.audio_first),
                         _beat(chart.end_beat), condition, quality)
+                    song.learning_role = role
                     song.condition_known = known
                     song.point_beats = [p.beat for p in song.points]
                     song.authored_end_beat = song.end_beat
@@ -225,6 +237,8 @@ class ComposerV2Dataset(Dataset):
                     self.audit['charts'].append({'source': str(source), 'difficulty': slot,
                         'chart_sha256': chart_sha,
                         'first': chart.audio_first, 'quality': quality})
+                    if role!='full':
+                        self.audit['charts'][-1]['learning_role']=role
                     if difficulty_scorer is not None:
                         self.audit['charts'][-1].update(declared_level=declared, fitted_level=level)
                     if any(dialect_edits.values()):
@@ -242,6 +256,8 @@ class ComposerV2Dataset(Dataset):
                                      'chart_cache_hits': cache_hits}
         del prepared_charts, manifest_bytes, payload, entries, quality_data
         if not self.songs:
+            if full_sources_only and self.audit.get('mechanics_validation_excluded'):
+                raise ValueError('验证集需要有通过筛选的完整学习谱面，仅学动作的谱面不用于选择 best')
             if 'difficulty_selection' in self.audit:
                 raise ValueError('当前难度筛选条件下没有可用谱面。'
                                  f'已筛除 {len(self.audit["filtered"])} 张。解析或估分失败示例：{self.audit["skipped"][:4]}')
@@ -249,25 +265,29 @@ class ComposerV2Dataset(Dataset):
         continuous = sequence_policy == 'continuous_events_v1'
         vocabulary_start = time.perf_counter()
         _report_preparation('vocabulary', 0, len(self.songs), vocabulary_start)
+        # Auxiliary sources cannot silently expand the writer's output grammar.
+        writing_sources=[s for s in self.songs if s.learning_role=='full']
+        if not writing_sources:
+            raise ValueError('请至少选择一个通过筛选的完整学习谱面')
         if codec is None:
             from .codec import ComponentCodec
             if continuous:
                 from .stream_codec import StreamCodec
-                codec=StreamCodec.fit((p.note_text for s in self.songs for p in s.points),
-                    ticks_per_beat=ticks_per_beat,phases=(p.beat for s in self.songs for p in s.points))
+                codec=StreamCodec.fit((p.note_text for s in writing_sources for p in s.points),
+                    ticks_per_beat=ticks_per_beat,phases=(p.beat for s in writing_sources for p in s.points))
             else:
-                codec = ComponentCodec.fit((p.note_text for s in self.songs for p in s.points),
+                codec = ComponentCodec.fit((p.note_text for s in writing_sources for p in s.points),
                     ticks_per_beat=ticks_per_beat, window_beats=window_beats)
                 # Train-observed phases are available at each window-relative integer.
-                phases = {p.beat % 1 for song in self.songs for p in song.points}
+                phases = {p.beat % 1 for song in writing_sources for p in song.points}
                 relative_times = {Fraction(integer) + phase
                                   for phase in phases for integer in range(-history_beats, window_beats)}
                 codec.configure_times(relative_times)
             self.audit['vocabulary_policy'] = 'fit_training_components_and_phases_once'
         elif extend_vocabulary:
             parent_codec = codec
-            phases = {p.beat % 1 for song in self.songs for p in song.points} if continuous else ()
-            codec = parent_codec.extended((p.note_text for song in self.songs for p in song.points),
+            phases = {p.beat % 1 for song in writing_sources for p in song.points} if continuous else ()
+            codec = parent_codec.extended((p.note_text for song in writing_sources for p in song.points),
                                           extra_tokens=('F:' + str(phase) for phase in phases))
             self.audit['vocabulary_policy'] = 'extend_checkpoint_for_finetune'
             added_tokens = codec.tokens[parent_codec.vocab_size:]
@@ -300,7 +320,7 @@ class ComposerV2Dataset(Dataset):
                     if continuous:
                         lengths_by_chart[chart_key] = song.event_token_lengths
             except VocabularyCoverageError as error:
-                if not validate_fixed_vocabulary:
+                if not validate_fixed_vocabulary and song.learning_role!='mechanics':
                     raise VocabularyCoverageError(
                         f'composer_v2 checkpoint cannot encode {song.source_path} '
                         f'difficulty={song.difficulty} beat={point.beat}: {error}') from error
@@ -309,7 +329,11 @@ class ComposerV2Dataset(Dataset):
                 record = dict(chart_index=index-1, source=str(song.source_path), difficulty=song.difficulty,
                               first_unsupported_beat=str(point.beat), reason=str(error))
                 vocabulary_exclusions.append(record)
-                print('composer_v2_validation_vocab_excluded ' + json.dumps(record, ensure_ascii=False), flush=True)
+                prefix='composer_v2_validation_vocab_excluded'
+                if song.learning_role=='mechanics':
+                    record['learning_role']='mechanics'
+                    prefix='composer_v2_mechanics_vocab_excluded'
+                print(prefix+' '+json.dumps(record,ensure_ascii=False),flush=True)
             else:
                 compatible_songs.append(song)
             if index % 100 == 0 or index == len(self.songs):
