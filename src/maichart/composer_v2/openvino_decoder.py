@@ -80,19 +80,10 @@ class DecoderRuntime:
         for layer, memory in zip(self.model.decoder, state['layers']):
             if 'self_kv' not in memory:
                 return None
-            local = memory.get('local_kv')
-            if local is not None and local[0].size(0) < audio['local'].size(0):
-                added=layer.local_attention.memory(audio['local'][local[0].size(0):])
-                local=tuple(torch.cat((old,new),0) for old,new in zip(local,added))
-                memory['local_kv']=local
-            elif local is None or local[0].size(0) != audio['local'].size(0):
-                local = layer.local_attention.memory(audio['local'])
-                memory['local_kv'] = local
+            local = layer.local_memory(audio, memory)
             inputs.extend((*memory['self_kv'], *(v[view] for v in local)))
             if layer.song_attention is not None:
-                if 'song_kv' not in memory:
-                    memory['song_kv'] = layer.song_attention.memory(audio['song'])
-                inputs.extend(memory['song_kv'])
+                inputs.extend(layer.song_memory(audio, memory))
         return inputs
 
     def _ir(self, wrapper, inputs, ov):

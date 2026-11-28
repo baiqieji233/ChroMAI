@@ -60,6 +60,9 @@ class DiskSpatialHistory(nn.Module):
         super().__init__()
         self.codec = codec
         self.tap_id = codec.ids.get('N:tap', -1)
+        self.timing_only_ids = frozenset(i for i,t in enumerate(codec.tokens)
+            if t.startswith('NUM:') or t in ('[AT]', '[PHASE]', '[END_EVENT]'))
+        self.rim_kind_ids = frozenset(i for i,t in enumerate(codec.tokens) if t in ('N:hold','N:slide','N:tap'))
         self.context = nn.Linear(_CONTEXT_WIDTH, width, bias=False)
         self.rim_readout = nn.Linear(width, len(_RIM_FEATURES))
         nn.init.zeros_(self.context.weight)
@@ -194,7 +197,7 @@ class DiskSpatialHistory(nn.Module):
         age = (beats - frame.completed_beats[..., 0]).clamp_min(0)
         return known, single, lanes, consecutive, steps, sizes, intervals, age
 
-    def features(self, frame, beats, *, single_cpu=False):
+    def features(self, frame, beats, *, single_cpu=False, context_only=False):
         if single_cpu and not bool(frame.layout & frame.contacts[..., 0].ne(0)):
             return None, None
         known, single, lanes, consecutive, steps, sizes, intervals, age = self._motion(frame, beats)
@@ -214,7 +217,7 @@ class DiskSpatialHistory(nn.Module):
         # The published query clock may be far ahead of the last completed note.
         fresh = known[..., 0] * frame.layout / (1 + age)
         context.mul_(fresh[..., None])
-        if single_cpu and not bool(frame.rim_query):
+        if context_only or (single_cpu and not bool(frame.rim_query)):
             return context, None
 
         latest = (frame.contacts[..., 0, None] >> self.nearest_shifts) & 255

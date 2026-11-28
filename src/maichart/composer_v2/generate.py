@@ -100,7 +100,7 @@ def parser():
     result.add_argument('--audio-device', choices=AUDIO_DEVICES, default='auto',
                         help='MERT device; auto prefers CUDA, then OpenVINO Intel GPU/NPU, then CPU')
     result.add_argument('--inference-backend', choices=('auto','torch','openvino-cpu','openvino-gpu'), default='auto',
-                        help='Incremental decoder backend; auto benchmarks available backends once')
+                        help='auto uses validated CUDA graphs on NVIDIA or compares available CPU/OpenVINO backends')
     result.add_argument('--cpu-threads', type=int, default=GENERATION_DEFAULTS['cpu_threads'],
                         help='CPU operator threads per process; 0 automatically budgets across parallel charts')
     result.add_argument('--max-events', type=int, default=0)

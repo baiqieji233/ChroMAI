@@ -174,6 +174,8 @@ class EventSampler(WindowSampler):
 
     def _reset_query_buffers(self):
         self._decoded_ids=();self._query_ids=()
+        self._committed_query=None
+        self._step_music=None
         self._clock_states=[];self._clocks=[]
         self._tiles=[];self._local_tiles=[];self._token_buffers=None
         if hasattr(self.model,'hand_memory'):
@@ -271,6 +273,9 @@ class EventSampler(WindowSampler):
         return fg
 
     def _rewind(self,target):
+        if self._at_committed_query(target):
+            return
+        self._committed_query=None
         for other in (getattr(self,'_reference_free',None), getattr(self,'_layout_free',None)):
             if other is not None:
                 other._rewind(target)
@@ -288,6 +293,19 @@ class EventSampler(WindowSampler):
         retained=min(common,max(0,len(desired)-1))
         self.model.rewind_decode_cache(self.cache,retained+1)
         self._decoded_ids=decoded[:self.cache['decode_state']['length']]
+
+    def _at_committed_query(self,target):
+        saved=getattr(self,'_committed_query',None)
+        return (saved is not None and self.cache.get('decode_state') is saved[1]
+                and saved[1]['length']==len(self.prefix)+len(target) and saved[0]==tuple(target))
+
+    def committed_hands(self,target):
+        self._rewind(target)
+        logits=self._logits(target)
+        # Closing this event also produced the raw distribution for opening
+        # the next one. Its sampling temperature, grammar and RNG still apply.
+        self._committed_query=(tuple(target),self.cache['decode_state'],logits)
+        return self._read_committed_hands(len(self.prefix)+len(target)-1)
     def next(self,target,allowed,*,action=False):
         if getattr(self,'progress',None) is not None:self.progress.pulse()
         if len(target)>=self.max_tokens//2:raise RefreshContext('Component budget reached inside next event')
@@ -355,6 +373,9 @@ class EventSampler(WindowSampler):
                 proposal_logits=logits,allowed=allowed,temperature=temperature,top_p=top_p)
         return token
     def _logits(self,target,*,all_new=False,layout_history=None):
+        if not all_new and layout_history is None and self._at_committed_query(target):
+            return self._committed_query[2]
+        self._committed_query=None
         if layout_history is not None:
             self._update_layout_mask(layout_history)
         ids=(*self.prefix,*target)
@@ -416,7 +437,10 @@ class EventSampler(WindowSampler):
                 self._layout_mask.index_fill_(1, indices, False)
             token_mask = self._layout_mask
         clocks=self._clocks
-        if upload_start<len(ids):
+        if upload_start+1==len(ids):
+            token_ids[0,upload_start].fill_(ids[-1])
+            token_beats[0,upload_start].fill_(clocks[-1])
+        elif upload_start<len(ids):
             token_ids[0,upload_start:len(ids)]=torch.tensor(ids[upload_start:],device=self.device)
             token_beats[0,upload_start:len(ids)]=torch.tensor(clocks[upload_start:],dtype=torch.float32,device=self.device)
         self._query_ids=ids
@@ -424,6 +448,9 @@ class EventSampler(WindowSampler):
             'token_mask':token_mask[:,:len(ids)],'tile_ids_cpu':[self._tiles],'local_tile_ids_cpu':[local_tiles]}
         state=self.cache.get('decode_state') if not self.model.training and not torch.is_grad_enabled() else None
         start=int(state['length']) if state and state['length']<len(ids) else 0
+        if state and start>=len(self.prefix) and start+1==len(ids):
+            query['single_step_token']=ids[-1]
+            query['single_step_clock']=clocks[-1]
         if hasattr(self,'_hand_timeline'):
             retained_hand=min(retained,len(self._hand_timeline.states))
             if self._hand_buffer is None or self._hand_buffer.size(1)<len(ids):
@@ -433,40 +460,49 @@ class EventSampler(WindowSampler):
             mask=self._masked_layout if layout_history is not None else frozenset()
             new_rows=self._hand_timeline.extend(ids,retained_hand,mask)
             if len(new_rows):
-                self._hand_buffer[0,retained_hand:len(ids)]=torch.from_numpy(new_rows).to(self.device)
+                self._hand_buffer[0,retained_hand:len(ids)].copy_(torch.from_numpy(new_rows),non_blocking=True)
             query['hand_timeline']=self._hand_buffer[:,start:len(ids)]
             query['hand_timeline_start']=start
-        if getattr(self.dataset,'intensity_policy','off')!='off':
-            from .intensity import query_indices
-            query.update({k:v[None].to(self.device) for k,v in query_indices(self.song,clocks[start:]).items()})
-            query['curve_query_start']=start
+        query.update(self._music_inputs(clocks,start,query.get('single_step_clock')))
+        query.update(curve_query_start=start,reference_evidence_start=start,paired_music_start=start)
         if getattr(self.dataset,'onset_readout_policy','off') != 'off':
             phase_id=self.codec.ids['[PHASE]']
             query['phase_queries_cpu']=[(0,pos,self._tiles[pos]) for pos in range(start,len(ids)) if ids[pos]==phase_id]
-        if self.dataset._evidence_v2():
-            from .rhythm_structure import local_evidence
-            boundary=max(start,len(self.prefix))
-            pieces=[]
-            if start<len(self.prefix):pieces.append(self.batch['reference_evidence'][:,start:len(self.prefix)])
-            if boundary<len(ids):
-                values=local_evidence(self.dataset._profile(self.song),clocks[boundary:],self.reference['shift'],
-                    start=math.floor(self.cursor)-4,end=self.reference_refresh_beat)
-                pieces.append(torch.as_tensor(values,device=self.device)[None])
-            query['reference_evidence']=torch.cat(pieces,1)
-            query['reference_evidence_start']=start
-        if self.dataset._paired_music():
-            from .music_evidence import paired_music_features
-            boundary=max(start,len(self.prefix));pieces=[]
-            if start<len(self.prefix):pieces.append(self.batch['paired_music_features'][:,start:len(self.prefix)])
-            if boundary<len(ids):
-                values=paired_music_features(self.dataset._profile(self.song),clocks[boundary:],self.reference['shift'],
-                    start=math.floor(self.cursor)-4,end=self.reference_refresh_beat)
-                pieces.append(torch.as_tensor(values,device=self.device)[None])
-            query['paired_music_features']=torch.cat(pieces,1)
-            query['paired_music_start']=start
         logits=self.model.decode(query,self.cache)[0]
         self._decoded_ids=ids
         return logits if all_new else logits[-1]
+
+    def _music_inputs(self,clocks,start,step_clock):
+        # The beat does not advance between the components of a note. Each
+        # sampler owns its reference selection and its one reusable audio row.
+        if step_clock is not None and self._step_music is not None and self._step_music[0]==step_clock:
+            return self._step_music[1]
+        result={}
+        if getattr(self.dataset,'intensity_policy','off')!='off':
+            from .intensity import query_indices
+            result.update({k:v[None].to(self.device) for k,v in query_indices(self.song,clocks[start:]).items()})
+        boundary=max(start,len(self.prefix))
+        if self.dataset._evidence_v2():
+            from .rhythm_structure import local_evidence
+            pieces=[]
+            if start<len(self.prefix):pieces.append(self.batch['reference_evidence'][:,start:len(self.prefix)])
+            if boundary<len(clocks):
+                values=local_evidence(self.dataset._profile(self.song),clocks[boundary:],self.reference['shift'],
+                    start=math.floor(self.cursor)-4,end=self.reference_refresh_beat)
+                pieces.append(torch.as_tensor(values,device=self.device)[None])
+            result['reference_evidence']=torch.cat(pieces,1)
+        if self.dataset._paired_music():
+            from .music_evidence import paired_music_features
+            pieces=[]
+            if start<len(self.prefix):pieces.append(self.batch['paired_music_features'][:,start:len(self.prefix)])
+            if boundary<len(clocks):
+                values=paired_music_features(self.dataset._profile(self.song),clocks[boundary:],self.reference['shift'],
+                    start=math.floor(self.cursor)-4,end=self.reference_refresh_beat)
+                pieces.append(torch.as_tensor(values,device=self.device)[None])
+            result['paired_music_features']=torch.cat(pieces,1)
+        if step_clock is not None:
+            self._step_music=(step_clock,result)
+        return result
 
     def _read_hand_plan(self):
         state = self.cache['decode_state']
@@ -546,6 +582,10 @@ class EventSampler(WindowSampler):
         scope=(tuple(target),after,end)
         self._retry_offset=0;self._retry_base=list(target)
         self._retry_cache_dirty=False;self._retry_condition=True
+        if fixed is not None:
+            # An audited scaffold reads the final prefix token again along
+            # with every forced timing token in a single multi-token query.
+            self._committed_query=None
         self._rewind(target)
         fg=self._forward_guard()
         # A compact Tap such as "12" is one text atom but two note heads.
@@ -1057,11 +1097,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         if hand_records is not None:record_hand(point,encoded)
         if committed_hands is not None and not (history_edited or accepted_omissions):
             actual=[*target,*encoded]
-            sampler._rewind(actual)
-            sampler._logits(actual)
             previous=points[-2] if len(points)>1 else None
-            committed_hands[point.beat]=(point,point.note_text,previous,
-                sampler._read_committed_hands(len(sampler.prefix)+len(actual)-1))
+            committed_hands[point.beat]=(point,point.note_text,previous,sampler.committed_hands(actual))
         progress.position(clock,point.beat,audio.duration_sec,events=len(points))
         if recovery.commit(point.beat):release_trials.clear();native_memo.clear()
         if history_edited or accepted_omissions:

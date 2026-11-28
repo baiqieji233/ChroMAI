@@ -111,10 +111,13 @@ def _stable_biased_attention(query, key, value, mask, causal):
             dropout_p=0., is_causal=causal).to(query.dtype)
 
 
+def _rms_unit(value):
+    fp32 = value.float()
+    return (fp32 * torch.rsqrt(fp32.square().mean(-1, keepdim=True) + 1e-6)).to(value.dtype)
+
+
 def _normalized_qk(query, key):
-    q32, k32 = query.float(), key.float()
-    return ((q32 * torch.rsqrt(q32.square().mean(-1, keepdim=True) + 1e-6)).to(query.dtype),
-            (k32 * torch.rsqrt(k32.square().mean(-1, keepdim=True) + 1e-6)).to(key.dtype))
+    return _rms_unit(query), _rms_unit(key)
 
 
 def _normalized_attention(query, key, value, mask, causal, stable):
@@ -159,7 +162,7 @@ class Attention(nn.Module):
         return tuple(self.split(part) for part in F.linear(value,*self._inference_qkv).chunk(3,dim=-1))
 
     def forward(self,query,memory=None,*,kv=None,key_mask=None,causal=False,past_length=0,query_beats=None,key_beats=None,
-                projected_query=None):
+                projected_query=None, key_normalized=False, prepared_mask=None):
         if projected_query is not None:
             q=projected_query
             k,v=kv
@@ -174,25 +177,16 @@ class Attention(nn.Module):
         if causal and not implicit_causal and not (q.size(-2)==1 and past_length+1==k.size(-2)):
             allowed=torch.arange(k.size(-2),device=q.device)[None,:] <= (torch.arange(q.size(-2),device=q.device)[:,None]+past_length)
             mask=allowed[None,None] if mask is None else mask&allowed[None,None]
-        if hasattr(self,'relative_beat'):
-            gap=key_beats[:,None,:]-query_beats[:,:,None]
-            features=torch.stack((torch.log1p((-gap).clamp_min(0)),torch.log1p(gap.clamp_min(0))),-1)
-            bias=torch.einsum('bqkf,hf->bhqk',features,self.relative_beat)
-            mask=bias.masked_fill(~mask,-torch.inf) if mask is not None else bias
-            mask=mask.to(q.dtype)
-        if self.local:
-            gap=key_beats[:,None,:]-query_beats[:,:,None]
-            bias=-(F.softplus(self.past)[None,:,None,None]*(-gap[:,None]).clamp_min(0)
-                   +F.softplus(self.future)[None,:,None,None]*gap[:,None].clamp_min(0))
-            mask=bias.masked_fill(~mask,-torch.inf) if mask is not None else bias
-            mask=mask.to(q.dtype)
+        mask = prepared_mask if prepared_mask is not None else self.beat_mask(mask,query_beats,key_beats,q.dtype)
         # Fused low-precision backward loses softmax's zero-sum score gradient
         # when audio keys acquire a large common offset. The resulting error
         # is amplified by those keys, even with finite losses and gradient clipping.
         biased_training = (torch.is_grad_enabled() and q.is_cuda
                            and q.dtype in (torch.float16, torch.bfloat16)
                            and (self.local or hasattr(self, 'relative_beat')))
-        if self.normalization == 'qk_rms_v1':
+        if key_normalized:
+            attended=F.scaled_dot_product_attention(_rms_unit(q),k,v,attn_mask=mask,dropout_p=0.,is_causal=implicit_causal)
+        elif self.normalization == 'qk_rms_v1':
             # Projected Q/K magnitudes are not bounded by pre-LayerNorm.
             # Fixed RMS normalization bounds content logits by sqrt(dim).
             # Recompute normalization and attention together so long batches
@@ -212,6 +206,38 @@ class Attention(nn.Module):
         else:
             attended=F.scaled_dot_product_attention(q,k,v,attn_mask=mask,dropout_p=0.,is_causal=implicit_causal)
         return self.out(attended.transpose(1,2).reshape(query.shape))
+
+    def beat_mask(self, mask, query_beats, key_beats, dtype):
+        if hasattr(self,'relative_beat'):
+            gap=key_beats[:,None,:]-query_beats[:,:,None]
+            features=torch.stack((torch.log1p((-gap).clamp_min(0)),torch.log1p(gap.clamp_min(0))),-1)
+            bias=torch.einsum('bqkf,hf->bhqk',features,self.relative_beat)
+        elif self.local:
+            gap=key_beats[:,None,:]-query_beats[:,:,None]
+            bias=-(F.softplus(self.past)[None,:,None,None]*(-gap[:,None]).clamp_min(0)
+                   +F.softplus(self.future)[None,:,None,None]*gap[:,None].clamp_min(0))
+        else:
+            return mask
+        return (bias.masked_fill(~mask,-torch.inf) if mask is not None else bias).to(dtype)
+
+    def read_audio_step(self, query, kv, key_mask, query_beats, key_beats, tile, clock, saved):
+        # Several components of one note share a beat. Normalized audio keys
+        # survive beat changes; the additive bias also survives within a beat.
+        if saved.get('source') is not kv or saved.get('tile') != tile:
+            selected = tuple(v[tile:tile+1] for v in kv) if tile is not None else kv
+            key, value = selected
+            normalized = self.normalization == 'qk_rms_v1'
+            saved.clear()
+            saved.update(source=kv, tile=tile, kv=(_rms_unit(key) if normalized else key, value))
+        if (saved.get('clock') != clock or saved.get('mask_source') is not key_mask
+                or saved.get('beat_source') is not key_beats):
+            rows = slice(tile,tile+1) if tile is not None else slice(None)
+            saved['mask'] = self.beat_mask(key_mask[rows, None, None, :], query_beats,
+                key_beats[rows] if key_beats is not None else None, kv[0].dtype)
+            saved['clock'] = clock
+            saved['mask_source'], saved['beat_source'] = key_mask, key_beats
+        return self(query, kv=saved['kv'], key_normalized=self.normalization=='qk_rms_v1',
+                    prepared_mask=saved['mask'])
 
 
 class EncoderBlock(nn.Module):
@@ -252,6 +278,8 @@ class DecoderBlock(nn.Module):
     def _append_cached_kv(self,kv,state):
         """Append into reusable storage; rewinding only changes the live views."""
         old=state.get('self_kv');old_length=old[0].size(-2) if old is not None else 0
+        if 'unit_length' in state:
+            state['unit_length']=min(state['unit_length'],old_length)
         length=old_length+kv[0].size(-2)
         storage=state.get('self_kv_storage')
         if storage is None or storage[0].size(-2)<length:
@@ -263,7 +291,23 @@ class DecoderBlock(nn.Module):
         for buffer,value in zip(storage,kv):buffer[...,old_length:length,:].copy_(value)
         return tuple(buffer[...,:length,:] for buffer in storage),old_length
     _append_cpu_kv=_append_cached_kv  # OpenVINO commits into the same host-owned cache.
-    def forward(self,x,condition,token_mask,beats,audio,*,state=None,groups=None,right_padded=False):
+
+    def _cpu_unit_keys(self, keys, state):
+        # Raw K/V remain available for OpenVINO. Only the verified, unchanged
+        # prefix can be reused after either backend appends a different branch.
+        length = keys.size(-2)
+        valid = state.get('unit_length', 0)
+        unit = state.get('unit_keys')
+        if unit is None or unit.size(-2) < length:
+            storage = torch.empty_like(state['self_kv_storage'][0])
+            if valid:
+                storage[..., :valid, :].copy_(unit[..., :valid, :])
+            unit = state['unit_keys'] = storage
+        unit[..., valid:length, :].copy_(_rms_unit(keys[..., valid:, :]))
+        state['unit_length'] = length
+        return unit[..., :length, :]
+
+    def forward(self,x,condition,token_mask,beats,audio,*,state=None,groups=None,right_padded=False,step_clock=None):
         value=self.norms[0](x+condition[:,None])
         if state is not None:
             q=None
@@ -280,24 +324,23 @@ class DecoderBlock(nn.Module):
                 old_length=state['self_kv'][0].size(-2)
                 kv=tuple(torch.cat((old,new),dim=-2) for old,new in zip(state['self_kv'],kv))
             state['self_kv']=kv
-            attended=self.self_attention(value,kv=kv,key_mask=token_mask,causal=True,past_length=old_length,projected_query=q)
+            unit_keys=(step_clock is not None and kv[0].device.type=='cpu'
+                       and self.self_attention.normalization=='qk_rms_v1')
+            if unit_keys:
+                kv=(self._cpu_unit_keys(kv[0],state),kv[1])
+            attended=self.self_attention(value,kv=kv,key_mask=token_mask,causal=True,past_length=old_length,
+                projected_query=q,key_normalized=unit_keys)
         else:
             # With right padding, active causal queries cannot see the padded suffix.
             mask = None if self.training and self.flash_self_attention and right_padded else token_mask
             attended=self.self_attention(value,value,key_mask=mask,causal=True)
         x=x+self.drop(attended)
-        local_kv=state.get('local_kv') if state is not None else None
-        if local_kv is not None and local_kv[0].size(0)<audio['local'].size(0):
-            # Within one context, newly discovered audio tiles only append.
-            added=self.local_attention.memory(audio['local'][local_kv[0].size(0):])
-            local_kv=tuple(torch.cat((old,new),0) for old,new in zip(local_kv,added))
-            state['local_kv']=local_kv
-        elif local_kv is not None and local_kv[0].size(0)!=audio['local'].size(0):local_kv=None
-        if local_kv is None:
-            local_kv=self.local_attention.memory(audio['local'])
-            if state is not None:state['local_kv']=local_kv
+        local_kv=self.local_memory(audio,state)
         query=self.norms[1](x+condition[:,None])
-        if groups is None:
+        if step_clock is not None:
+            attended=self.local_attention.read_audio_step(query,local_kv,audio['local_mask'],beats,
+                audio['local_beats'],groups,step_clock,state.setdefault('local_step',{}))
+        elif groups is None:
             attended=self.local_attention(query,kv=local_kv,key_mask=audio['local_mask'],query_beats=beats,key_beats=audio['local_beats'])
         elif isinstance(groups,int):
             # One incremental token reads one tile. Slices share cached memory;
@@ -316,12 +359,35 @@ class DecoderBlock(nn.Module):
             attended=attended.new_zeros(query.numel()//query.size(-1),query.size(-1)).index_add(0,indices.flatten(),attended).reshape_as(query)
         x=x+self.drop(attended)
         if self.song_attention is not None:
-            song_kv=state.get('song_kv') if state is not None else None
-            if song_kv is None:
-                song_kv=self.song_attention.memory(audio['song'])
-                if state is not None:state['song_kv']=song_kv
-            x=x+self.drop(self.song_attention(self.norms[2](x+condition[:,None]),kv=song_kv,key_mask=audio['song_mask'],query_beats=beats,key_beats=audio.get('song_beats')))
+            song_kv=self.song_memory(audio,state)
+            query=self.norms[2](x+condition[:,None])
+            if step_clock is not None:
+                song_read=self.song_attention.read_audio_step(query,song_kv,audio['song_mask'],beats,
+                    audio.get('song_beats'),None,step_clock,state.setdefault('song_step',{}))
+            else:
+                song_read=self.song_attention(query,kv=song_kv,key_mask=audio['song_mask'],query_beats=beats,key_beats=audio.get('song_beats'))
+            x=x+self.drop(song_read)
         return x+self.drop(self.ff(self.norms[3](x)))
+
+    def local_memory(self,audio,state):
+        local_kv=state.get('local_kv') if state is not None else None
+        if local_kv is not None and local_kv[0].size(0)<audio['local'].size(0):
+            # Within one context, newly discovered audio tiles only append.
+            added=self.local_attention.memory(audio['local'][local_kv[0].size(0):])
+            local_kv=tuple(torch.cat((old,new),0) for old,new in zip(local_kv,added))
+            state['local_kv']=local_kv
+        elif local_kv is not None and local_kv[0].size(0)!=audio['local'].size(0):local_kv=None
+        if local_kv is None:
+            local_kv=self.local_attention.memory(audio['local'])
+            if state is not None:state['local_kv']=local_kv
+        return local_kv
+
+    def song_memory(self,audio,state):
+        song_kv=state.get('song_kv') if state is not None else None
+        if song_kv is None:
+            song_kv=self.song_attention.memory(audio['song'])
+            if state is not None:state['song_kv']=song_kv
+        return song_kv
 
 
 class ComposerV2(nn.Module):
@@ -450,6 +516,9 @@ class ComposerV2(nn.Module):
         return weight
     def _clear_inference_caches(self):
         self._song_cache.clear();self._structured_weight_cache.clear()
+        runtime=getattr(self,'_decoder_runtime',None)
+        if hasattr(runtime,'reset'):
+            runtime.reset()
         for layer in self.decoder:
             layer.self_attention._inference_qkv=None
     def train(self,mode=True):
@@ -617,15 +686,18 @@ class ComposerV2(nn.Module):
                 x=x+self.reference_evidence(evidence[:,start-offset:].float())
         if hasattr(self,'intensity'):
             x=x+self.intensity(cache['curve_context'],batch,start=start)
+        step_token=batch.get('single_step_token') if use_cache and value.numel()==1 else None
         rim_features=None
         if use_spatial_history and hasattr(self, 'spatial_history'):
             spatial_state=state.setdefault('spatial', {}) if use_cache else None
             spatial_frame=self.spatial_history.scan(value,beats,batch['token_mask'][:,start:],
                                                     start=start,state=spatial_state)
-            single_cpu=use_cache and value.device.type=='cpu' and value.numel()==1
-            spatial_context,rim_features=self.spatial_history.features(spatial_frame,beats,single_cpu=single_cpu)
-            if spatial_context is not None:
-                x=x+self.spatial_history.context(spatial_context.to(x.dtype))
+            if step_token not in self.spatial_history.timing_only_ids:
+                single_cpu=use_cache and value.device.type=='cpu' and value.numel()==1
+                spatial_context,rim_features=self.spatial_history.features(spatial_frame,beats,single_cpu=single_cpu,
+                    context_only=step_token is not None and step_token not in self.spatial_history.rim_kind_ids)
+                if spatial_context is not None:
+                    x=x+self.spatial_history.context(spatial_context.to(x.dtype))
         x=self.dropout(x);condition=cache['condition'] if 'condition' in cache else self.condition_context(batch)
         groups=None
         if 'tile_ids_cpu' in batch:
@@ -641,7 +713,8 @@ class ComposerV2(nn.Module):
             for i,layer in enumerate(self.decoder):
                 x=self._training_block(layer,x,condition,batch['token_mask'],beats,cache,
                     state=state['layers'][i] if use_cache else None,groups=groups,
-                    right_padded=batch.get('right_padded_tokens',False))
+                    right_padded=batch.get('right_padded_tokens',False),
+                    step_clock=batch.get('single_step_clock') if isinstance(groups,int) and use_cache else None)
         if hasattr(self,'local_writing'):
             x=x+self.local_writing.read(cache['writing_context'],batch,start,value,self.writing_query_tokens,
                 time_mask=self.writing_time_tokens,indices=writing_tiles)
@@ -679,9 +752,12 @@ class ComposerV2(nn.Module):
         intent_plan = cache.get('intent_plan')
         if batch.get('intent_mode') == 'off' or batch.get('intent_strength', 1.) == 0.:
             intent_plan = None
-        if (intent_plan is not None and use_cache and value.device.type == 'cpu' and value.numel() == 1
-                and not self.intent.layout_inputs[value.item()]):
-            intent_plan = None
+        if intent_plan is not None and use_cache and value.numel()==1:
+            token = step_token
+            if token is None and value.device.type=='cpu':
+                token=value.item()
+            if token is not None and token not in self.intent.layout_input_ids:
+                intent_plan=None
         if button_queries is not None:
             queried=normalized[button_queries]
             logits=F.linear(queried,weight.index_select(0,self.rim_button_ids),

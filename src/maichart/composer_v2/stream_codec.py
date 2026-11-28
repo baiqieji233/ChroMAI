@@ -21,7 +21,8 @@ class StreamCodec(ComponentCodec):
         self.at_id=self.ids['[AT]'];self.phase_id=self.ids['[PHASE]']
         self.event_end_id=self.ids['[END_EVENT]']
         self.phases={i:Fraction(t[2:]) for i,t in enumerate(tokens) if t.startswith('F:')}
-        self._phase_order=sorted(set(self.phases.values()))
+        self._phases_by_time=sorted(self.phases,key=self.phases.__getitem__)
+        self._phase_order=[self.phases[i] for i in self._phases_by_time]
         self._phase_ids=tuple(self.phases)
         self._phase_bounds=(self._phase_order[0],self._phase_order[-1]) if self.phases else None
         self.digits={self.ids['NUM:'+str(i)]:str(i) for i in range(10)}
@@ -128,7 +129,11 @@ class StreamCodec(ComponentCodec):
             lower,upper=after-whole,end-whole
             if lower<self._phase_bounds[0] and self._phase_bounds[1]<upper:
                 return self._phase_ids
-            return tuple(i for i,p in self.phases.items() if lower<p<upper)
+            # At a boundary only a slice of the exact rational vocabulary is
+            # legal. Preserve token-ID order, including equivalent spellings.
+            start=bisect_right(self._phase_order,lower)
+            stop=bisect_left(self._phase_order,upper)
+            return tuple(sorted(self._phases_by_time[start:stop]))
         digits=''.join(self.digits[i] for i in prefix[1:])
         def possible(s):
             if len(s)>1 and s[0]=='0':return False

@@ -33,22 +33,27 @@ def configure_threads(requested,device,parallel=1):
 def configure_model(model, args, device):
     """Attach runtime-only acceleration after loading/moving checkpoint weights."""
     requested=getattr(args,'inference_backend','auto')
-    if getattr(model,'_inference_backend',None)==requested:
-        runtime=getattr(model,'_decoder_runtime',None)
-        if runtime is not None and runtime.selected is not None:
+    selection = (str(device), requested)
+    if getattr(model, '_inference_backend', None) == selection:
+        runtime = getattr(model, '_decoder_runtime', None)
+        if getattr(runtime, 'selected', None) is not None:
             import torch
             torch.set_num_threads(runtime.threads)
         return
-    model._inference_backend=requested
-    model._decoder_runtime=None
-    if str(device)!='cpu' or requested=='torch':
-        if str(device)!='cpu' and requested not in ('auto','torch'):
-            raise ValueError('OpenVINO decoder requires --device cpu (audio device is independent)')
-        return
-    from .acceleration import openvino_devices
-    if not openvino_devices():
-        if requested!='auto':
+    runtime = None
+    if str(device).startswith('cuda') and requested == 'auto':
+        import torch
+        from .cuda_decoder import CudaDecoderRuntime
+        if torch.version.cuda is not None:
+            runtime = CudaDecoderRuntime(model.decoder)
+    elif str(device) == 'cpu' and requested != 'torch':
+        from .acceleration import openvino_devices
+        if openvino_devices():
+            from .openvino_decoder import DecoderRuntime
+            runtime = DecoderRuntime(model,args)
+        elif requested != 'auto':
             raise RuntimeError('OpenVINO unavailable; install the intel-acceleration extra')
-        return
-    from .openvino_decoder import DecoderRuntime
-    model._decoder_runtime=DecoderRuntime(model,args)
+    elif requested not in ('auto', 'torch'):
+        raise ValueError('OpenVINO decoder requires --device cpu (audio device is independent)')
+    model._inference_backend = selection
+    model._decoder_runtime = runtime

@@ -101,10 +101,12 @@ class PhraseIntent(nn.Module):
         candidates = [index for index, token in enumerate(codec.tokens) if _layout_token(token)]
         # Timing proposals begin after a target/event boundary and have their
         # own tokens. This hook starts only after the event's exact phase.
-        self.register_buffer('layout_inputs', torch.tensor([
+        layout_inputs = [
             (token != '[END_EVENT]' and _layout_token(token)) or token.startswith(('F:', 'D:', 'V:'))
             or token == '[END_DURATION]' for token in codec.tokens
-        ]), persistent=False)
+        ]
+        self.layout_input_ids = frozenset(i for i,active in enumerate(layout_inputs) if active)
+        self.register_buffer('layout_inputs', torch.tensor(layout_inputs), persistent=False)
         self.register_buffer('component_ids', torch.tensor(candidates, dtype=torch.long), persistent=False)
         # Slot zero belongs to the held-out query. A malformed support mask
         # cannot promote that row into the teacher or the decoder path.
