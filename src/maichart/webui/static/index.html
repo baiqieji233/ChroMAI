@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/styles.css?v=audit-source-selection-20261115">
   <link rel="stylesheet" href="/workspace.css?v=20261122-generation-history">
   <link rel="stylesheet" href="/workspace_logs.css">
+  <link rel="stylesheet" href="/generation_queue.css">
 </head>
 <body>
   <header class="topbar">
@@ -29,10 +30,43 @@
 
       <nav class="mode-tabs" aria-label="工作模式">
         <button id="generationModeTab" class="mode-tab" type="button" data-mode="generation"><span class="mode-tab-title">生成谱面</span><small>导入歌曲直接写谱</small></button>
+        <button id="batchGenerationModeTab" class="mode-tab" type="button" data-mode="batch"><span class="mode-tab-title">批量生成</span><small>多首歌曲 · 叠加预设</small></button>
         <button id="qualityModeTab" class="mode-tab" type="button" data-mode="quality"><span class="mode-tab-title">训练素材</span><small>自动体检 · 片段复核</small></button>
         <button id="trainingModeTab" class="mode-tab active" type="button" data-mode="training"><span class="mode-tab-title">训练模型</span><small>微调加强 · 从头训练</small></button>
         <button id="intensityModeTab" class="mode-tab" hidden type="button" data-mode="intensity">强度曲线</button>
       </nav>
+<section class="panel batch-generation-panel" id="batchGenerationPanel" hidden>
+  <header class="batch-heading">
+    <div><h2>批量生成</h2><p class="muted">Composer v2 · 按歌曲顺序生成</p></div>
+    <div class="batch-actions"><button type="button" id="batchPresetNew" class="secondary-button">保存预设</button><button type="button" id="batchPresetLibrary" class="secondary-button">预设库</button></div>
+  </header>
+  <section class="batch-shared" aria-labelledby="batchSharedHeading">
+    <div class="batch-heading"><h3 id="batchSharedHeading">全批设置</h3><div class="batch-actions"><button type="button" id="batchCopyBase" class="secondary-button">从生成页复制设置</button><button type="button" id="batchEditBase" class="secondary-button">编辑基准参数</button></div></div>
+    <label class="field batch-checkpoint">共用模型路径<input id="batchCheckpoint" type="text" spellcheck="false" placeholder="填写 Composer v2 checkpoint 路径"></label>
+    <div id="batchLayers"></div>
+  </section>
+  <div class="batch-workspace">
+    <section class="batch-songs" aria-labelledby="batchSongsHeading">
+      <div class="batch-heading"><h3 id="batchSongsHeading">歌曲队列 <span id="batchSongCount" class="muted"></span></h3></div>
+      <div class="batch-actions">
+        <button type="button" id="batchChooseAudio" class="secondary-button">导入音频</button>
+        <input type="file" id="batchAudioFiles" accept="audio/*,.flac,.ogg,.opus,.m4a,.wav,.mp3,.aac" multiple hidden>
+        <button type="button" id="batchAddPaths" class="secondary-button">粘贴路径</button>
+        <button type="button" id="batchAddCurrent" class="secondary-button">加入生成页当前歌曲</button>
+      </div>
+      <ol id="batchSongs" class="batch-song-list" aria-label="歌曲执行顺序"></ol>
+      <p id="batchEmpty" class="batch-empty muted">导入音频后，可逐首调整预设和参数。</p>
+    </section>
+    <section class="batch-song-settings" aria-label="所选歌曲设置" id="batchSongSettings" hidden></section>
+  </div>
+  <div class="batch-run-bar">
+    <p id="batchPlanSummary" class="muted"></p>
+    <div class="batch-actions"><button type="button" id="batchPreview" class="secondary-button">核对参数</button><button type="button" id="batchStart" class="primary-button">开始批量生成</button></div>
+  </div>
+  <p id="batchMessage" class="inline-status" role="status" hidden></p>
+  <section id="batchRuns" class="batch-runs" aria-label="批量生成结果" hidden></section>
+</section>
+<dialog id="batchDialog" class="batch-dialog"></dialog>
 <section class="panel shared-preview-panel">
 <div id="generationHistory" class="generation-preview-toolbar generation-history" hidden>
 <label for="generationHistorySelect">生成历史<select id="generationHistorySelect" disabled><option value="">正在读取…</option></select></label>
@@ -2019,7 +2053,7 @@
     <div role="status"><strong>检查 checkpoint 后显示显存、模型大小和参数量</strong><small></small></div>
     <button class="secondary-button" type="button" disabled>刷新估算</button>
   </div>
-  <button id="generateButton" class="primary-button">生成谱面</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button>
+  <button id="generateButton" class="primary-button">生成谱面</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button><button id="batchSinglePresets" class="secondary-button" type="button">预设</button>
 </div>
 <details id="generationAcceptance" class="settings-section" data-advanced data-generation-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>
 <summary><span>生成后的诊断与对照（可选）</span><small>检查历史谱面，或使用自己选择的参考统计</small>
@@ -2182,11 +2216,12 @@
   </main>
   <script src="/workspace_logs.js"></script>
   <script src="/chart_preview.js?v=20261122-generation-history"></script>
-  <script src="/app.js?v=20261127-hand-memory"></script>
+  <script src="/app.js?v=generation-queue"></script>
   <script src="/reference_tempo.js?v=20261119-tempo-history" onerror="document.getElementById('v2ReferenceBadge').textContent='请重启此 WebUI 服务后刷新'"></script>
   <script src="/v2_intensity.js?v=20261123-local-tempo"></script>
   <script src="/review_exchange.js"></script>
   <script src="/candidate_feedback.js?v=20261122-generation-history"></script>
   <script src="/workspace.js?v=20261127-hand-memory"></script>
+  <script src="/generation_queue.js"></script>
 </body>
 </html>

@@ -243,8 +243,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return self._serve_static("composer.html")
         if parsed.path in {"/app.js", "/v2_intensity.js", "/chart_preview.js", "/candidate_feedback.js", "/review_exchange.js", "/styles.css", "/workspace.js", "/workspace.css",
                            "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js", "/form_lab.css",
-                           "/composer.js", "/composer.css", "/reference_tempo.js"}:
+                           "/composer.js", "/composer.css", "/reference_tempo.js",
+                           "/generation_queue.js", "/generation_queue.css"}:
             return self._serve_static(parsed.path.lstrip("/"))
+        if parsed.path == '/api/composer-v2/generation_queue':
+            from maichart.webui import generation_queue
+            queue_id = parse_qs(parsed.query).get('id', [''])[0]
+            state = generation_queue.status(queue_id, runtime=sys.modules[__name__])
+            return self._json_response(state if state is not None else {'error': '批量任务不存在'},
+                                       HTTPStatus.OK if state is not None else HTTPStatus.NOT_FOUND)
         if parsed.path.startswith('/miaview/') or parsed.path.startswith('/api/preview/'):
             return self._chart_preview(parsed)
         if parsed.path == "/api/status":
@@ -409,6 +416,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if operation == "train": return composer_v2_api.start_train(self, payload, runtime=sys.modules[__name__])
                 if operation == "chartgate_setup": return composer_v2_api.start_chartgate_setup(self, payload, runtime=sys.modules[__name__])
                 if operation == "generate": return composer_v2_api.start_generate(self, payload, runtime=sys.modules[__name__])
+                if operation in ('generation_queue_preview', 'generation_queue'):
+                    from maichart.webui import generation_queue
+                    action = generation_queue.preview if operation.endswith('_preview') else generation_queue.start
+                    return action(self, payload, runtime=sys.modules[__name__])
                 if operation == "curve": return composer_v2_api.start_curve(self, payload, runtime=sys.modules[__name__])
                 if operation == "media": return composer_v2_api.start_media(self, payload, runtime=sys.modules[__name__])
                 if operation == "evaluate": return composer_v2_api.start_evaluate(self, payload, runtime=sys.modules[__name__])
@@ -1929,30 +1940,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         task = _get_task(str(payload.get("task_id", "")))
         if task is None:
             raise ValueError("任务不存在")
-        with task.lock:
-            process = None
-            if task.status not in {"completed", "failed", "cancelled"} and not task.cancel_pending:
-                task.cancel_requested = True
-                task.status = "cancelling"
-                task.message = "正在取消，等待当前阶段退出"
-                process = task.process
-                task.cancel_error = None
-                task.cancel_pending = process is not None
-        if process is not None and process.poll() is None:
-            from maichart.webui.subprocess_control import terminate_task_process
-            try:
-                terminate_task_process(process)
-            except Exception as exc:
-                with task.lock:
-                    if task.status == "cancelling":
-                        task.cancel_error = str(exc)
-                        task.message = "取消失败，任务尚未确认停止；可重试取消"
-            finally:
-                with task.lock:
-                    task.cancel_pending = False
-        elif process is not None:
-            with task.lock:
-                task.cancel_pending = False
+        _request_task_cancel(task)
         self._json_response(task.to_dict())
 
     def _upload(self) -> None:
@@ -2361,6 +2349,37 @@ def _finish_cancelled_unlocked(task: TaskState, *, exit_code=None) -> None:
     task.cancel_error = None
     task.message = "任务已中断"
     _close_task_log(task, status="cancelled", exit_code=exit_code)
+
+
+def _request_task_cancel(task: TaskState) -> None:
+    with task.lock:
+        if task.status in {"completed", "failed", "cancelled"} or task.cancel_pending:
+            return
+        task.cancel_requested = True
+        task.status = "cancelling"
+        task.message = "正在取消，等待当前阶段退出"
+        process = task.process
+        task.cancel_error = None
+        task.cancel_pending = process is not None
+        child_id = task.result.get('active_task_id') if task.kind == 'composer_v2_generation_queue' else None
+    if child_id:
+        child = _get_task(child_id)
+        if child is not None:
+            _request_task_cancel(child)
+    if process is None:
+        return
+    try:
+        if process.poll() is None:
+            from maichart.webui.subprocess_control import terminate_task_process
+            terminate_task_process(process)
+    except Exception as exc:
+        with task.lock:
+            if task.status == "cancelling":
+                task.cancel_error = str(exc)
+                task.message = "取消失败，任务尚未确认停止；可重试取消"
+    finally:
+        with task.lock:
+            task.cancel_pending = False
 
 
 def _finish_if_cancelled(task: TaskState) -> bool:

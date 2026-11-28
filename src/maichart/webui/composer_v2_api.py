@@ -727,9 +727,21 @@ def start_train(handler,payload,*,runtime):
     return _start(handler,runtime,"composer_v2_train",args,settings,[directory/name for name in ("composer_v2_last.pt","composer_v2_best.pt","composer_v2_inference.pt")],directory)
 
 def start_generate(handler,payload,*,runtime):
+    args,settings,paths = prepare_generation(payload,runtime=runtime)
+    return _start(handler,runtime,"composer_v2_generate",args,settings,paths)
+
+
+def prepare_generation(payload, *, runtime, inspections=None, preview=False):
     _family(payload)
     checkpoint=_path(payload.get("checkpoint"),"checkpoint",exists=True)
-    checked=inspection(checkpoint)
+    if not checkpoint.is_file():
+        raise ValueError("checkpoint 必须是文件")
+    if inspections is None:
+        checked = inspection(checkpoint)
+    else:
+        checked = inspections.get(checkpoint)
+        if checked is None:
+            checked = inspections[checkpoint] = inspection(checkpoint)
     if not checked.get("valid"): raise ValueError("Composer v2 checkpoint 不可用："+str(checked.get("error") or checked.get("errors")))
     condition = payload.get("condition")
     if condition is None: condition = {}
@@ -750,6 +762,8 @@ def start_generate(handler,payload,*,runtime):
         from maichart.composer_v2.condition_guidance import validate as validate_guidance
         validate_guidance(True,checked.get('sequence_policy'),policy)
     audio=_path(payload.get("audio"),"audio",exists=True)
+    if not audio.is_file():
+        raise ValueError("音频路径必须是文件")
     output=_path(payload.get("output") or "outputs/composer_v2/maidata.txt","output")
     cache=_path(payload.get("cache_dir") or "cache/chart_composer_v2","cache_dir")
     settings=dict(checkpoint=str(checkpoint),audio=str(audio),output=str(output),cache_dir=str(cache))
@@ -927,8 +941,12 @@ def start_generate(handler,payload,*,runtime):
             value=payload[key]
             if isinstance(value,str): value=json.loads(value)
             if not isinstance(value,list): raise ValueError(f"{key} 必须是 JSON 数组")
-            argument = _tempo_map_argument(value, cache) if key == 'tempo_map' else json.dumps(value, ensure_ascii=False)
-            _arg(args,"--"+key.replace("_","-"),argument)
+            if preview and key == 'tempo_map':
+                from maichart.composer_v2.generate import _tempo_map
+                _tempo_map(value, settings['bpm'] or 120.)
+            if not preview:
+                argument = _tempo_map_argument(value, cache) if key == 'tempo_map' else json.dumps(value, ensure_ascii=False)
+                _arg(args,"--"+key.replace("_","-"),argument)
             settings[key]=value
     count=_integer(payload,'count',GENERATION_DEFAULTS['count'],minimum=1)
     if count>MAX_BATCH_COUNT:raise ValueError(f'一次最多生成 {MAX_BATCH_COUNT} 张谱面')
@@ -947,10 +965,13 @@ def start_generate(handler,payload,*,runtime):
         if strength>1:raise ValueError('编辑曲线强度必须在0–1之间')
         import uuid
         profile_path=runtime.INTENSITY_ROOT/(uuid.uuid4().hex+'.composer_v2_curve.json')
-        profile_path.parent.mkdir(parents=True,exist_ok=True)
-        profile_path.write_text(json.dumps(profile,ensure_ascii=False),encoding='utf-8')
-        _arg(args,'--intensity-curve',profile_path);_arg(args,'--intensity-strength',strength)
-        settings.update(intensity_curve=str(profile_path),intensity_strength=strength)
+        if not preview:
+            profile_path.parent.mkdir(parents=True,exist_ok=True)
+            profile_path.write_text(json.dumps(profile,ensure_ascii=False),encoding='utf-8')
+            _arg(args,'--intensity-curve',profile_path);_arg(args,'--intensity-strength',strength)
+        settings.update(intensity_curve=True if preview else str(profile_path),intensity_strength=strength)
+    if preview:
+        return args,settings,[]
     import uuid
     directory_tag = '_batch_' if count > 1 else '_'
     root = output.parent / (output.stem + directory_tag + uuid.uuid4().hex[:12])
@@ -965,7 +986,7 @@ def start_generate(handler,payload,*,runtime):
         _arg(args,'--count',count);_arg(args,'--batch-manifest',manifest)
         settings['batch_manifest'] = str(manifest)
         paths=[manifest]  # Successful chart artifacts are collected from it.
-    return _start(handler,runtime,"composer_v2_generate",args,settings,paths)
+    return args,settings,paths
 
 
 def _tempo_map_argument(value, cache_dir):

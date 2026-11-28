@@ -423,7 +423,7 @@
   }
 
   function reportError(message) {
-    const scope = ["training", "generation", "quality", "intensity"].includes(document.body.dataset.workspace)
+    const scope = ["training", "generation", "batch", "quality", "intensity"].includes(document.body.dataset.workspace)
       ? document.body.dataset.workspace : "training";
     const panel = $(`.${scope}-panel`);
     if (!panel) return;

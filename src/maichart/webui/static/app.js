@@ -2024,11 +2024,14 @@ function on(selector, eventName, handler) {
 // one very long scroll of unrelated controls.
 // ---------------------------------------------------------------------------
 function setWorkspaceMode(mode) {
-  const value = mode === "intensity" ? "generation" : ["generation", "quality"].includes(mode) ? mode : "training";
+  const value = mode === "intensity" ? "generation" : ["generation", "batch", "quality"].includes(mode) ? mode : "training";
   document.body.dataset.workspace = value;
   element("#trainingModeTab")?.classList.toggle("active", value === "training");
   element("#qualityModeTab")?.classList.toggle("active", value === "quality");
   element("#generationModeTab")?.classList.toggle("active", value === "generation");
+  element("#batchGenerationModeTab")?.classList.toggle("active", value === "batch");
+  const batchPanel = element("#batchGenerationPanel");
+  if (batchPanel) batchPanel.hidden = value !== "batch";
   element("#intensityModeTab")?.classList.toggle("active", value === "intensity");
   if (value === "intensity") requestAnimationFrame(drawIntensityCurve);
   window.MaichartWorkflow?.setLogsExpanded(false);
